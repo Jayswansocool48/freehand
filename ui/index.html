@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; font-src 'self'">
+  <title>Freehand</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256'%3E%3Crect width='256' height='256' rx='56' fill='%231e293b'/%3E%3Cpath d='M144 32 64 144h56l-8 80 80-112h-56z' fill='%23f8fafc'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="app" class="panel-closed">
+  <aside id="sidebar" aria-label="Chats">
+    <div class="side-top">
+      <span class="brand-mark"><span data-icon="lightning"></span></span>
+      <span class="brand-name">Freehand</span>
+      <button id="close-sidebar" class="icon-btn" title="Close sidebar" aria-label="Close sidebar"><span data-icon="sidebar-simple"></span></button>
+    </div>
+    <div class="side-actions">
+      <button id="new-task" class="side-btn"><span data-icon="note-pencil"></span>New task<kbd>Ctrl K</kbd></button>
+      <label class="side-search"><span data-icon="magnifying-glass"></span><input id="task-search" placeholder="Search tasks" aria-label="Search tasks" autocomplete="off"></label>
+    </div>
+    <div class="side-label">Recent</div>
+    <nav id="task-list" aria-label="Task history"></nav>
+    <div class="sidebar-foot">
+      <button id="open-settings" class="side-btn"><span data-icon="gear"></span>Settings</button>
+      <button id="toggle-theme" class="icon-btn" title="Switch light / dark" aria-label="Switch light or dark theme"><span data-icon="moon"></span></button>
+    </div>
+  </aside>
+
+  <main id="main" class="home">
+    <header id="topbar">
+      <button id="open-sidebar" class="icon-btn" title="Open sidebar" aria-label="Open sidebar" hidden><span data-icon="sidebar-simple"></span></button>
+      <button id="model-chip" class="model-btn" aria-haspopup="dialog" aria-expanded="false" title="Choose model"></button>
+      <div class="title-wrap">
+        <h1 id="task-title"></h1>
+        <span id="status-pill" class="pill" hidden></span>
+      </div>
+      <span class="grow"></span>
+      <button id="toggle-computer" class="icon-text" title="Show Freehand's computer"><span data-icon="desktop"></span>Computer</button>
+    </header>
+
+    <div id="model-pop" class="popover" role="dialog" aria-label="Choose model" hidden></div>
+
+    <div id="stage">
+      <div id="home-greet" class="home-greet">
+        <h2>What can I help you get done?</h2>
+      </div>
+
+      <section id="timeline" aria-live="polite"></section>
+
+      <div id="dock">
+        <div id="progress" hidden>
+          <ol id="progress-list" hidden></ol>
+          <button id="progress-toggle" type="button" aria-expanded="false">
+            <span id="progress-icon"></span>
+            <span id="progress-cur" class="cur"></span>
+            <span id="progress-count" class="count"></span>
+            <span id="progress-caret" data-icon="caret-up"></span>
+          </button>
+        </div>
+        <form id="composer" autocomplete="off">
+          <textarea id="input" rows="1" placeholder="Describe a task..." aria-label="Task or reply"></textarea>
+          <div class="composer-row">
+            <span id="composer-hint">Enter to send &middot; Shift+Enter for a new line</span>
+            <span class="grow"></span>
+            <button type="button" id="stop" class="send send-stop" title="Stop" aria-label="Stop" hidden><span data-icon="stop"></span></button>
+            <button type="submit" id="send" class="send" title="Send" aria-label="Send"><span data-icon="arrow-up"></span></button>
+          </div>
+        </form>
+        <div id="home-chips" class="home-chips" aria-label="Starting points"></div>
+      </div>
+    </div>
+  </main>
+
+  <aside id="computer" aria-label="Freehand's computer">
+    <div class="cp-head">
+      <div class="cp-title"><span data-icon="desktop"></span>Freehand's computer</div>
+      <div class="cp-tabs" role="tablist">
+        <button class="cp-tab active" data-cp="live" role="tab">Live</button>
+        <button class="cp-tab" data-cp="files" role="tab">Files</button>
+      </div>
+      <button id="cp-close" class="icon-btn" aria-label="Close panel"><span data-icon="x"></span></button>
+    </div>
+    <div id="cp-status" class="cp-status"></div>
+    <div id="cp-body" class="cp-body"></div>
+    <div id="cp-timeline" class="cp-timeline">
+      <button id="cp-prev" class="icon-btn" aria-label="Previous step"><span data-icon="caret-left"></span></button>
+      <input id="cp-slider" type="range" min="0" max="0" value="0" aria-label="Scrub through steps">
+      <button id="cp-next" class="icon-btn" aria-label="Next step"><span data-icon="caret-right"></span></button>
+      <button id="cp-live" class="btn btn-outline btn-sm" hidden><span data-icon="arrow-down"></span>Jump to live</button>
+    </div>
+  </aside>
+</div>
+
+<dialog id="settings" aria-labelledby="settings-title">
+  <form method="dialog" id="settings-form">
+    <div class="dlg-head"><h2 id="settings-title">Settings</h2><button value="cancel" class="icon-btn" aria-label="Close"><span data-icon="x"></span></button></div>
+    <div id="settings-body" class="dlg-body"></div>
+    <div class="dlg-foot"><span id="settings-msg" class="muted"></span><button type="button" id="save-settings" class="btn btn-primary">Save</button></div>
+  </form>
+</dialog>
+
+<script src="md.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

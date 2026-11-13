@@ -1,0 +1,159 @@
+'use strict';
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const { loadSettings, saveSettings, publicSettings, applyPatch, PROVIDER_PRESETS } = require('../core/config');
+const { listModels } = require('../core/providers');
+const { listDir } = require('../tools');
+const { safePath } = require('../core/util');
+const { TaskStore } = require('./tasks');
+
+const UI_DIR = path.join(__dirname, '..', '..', 'ui');
+const MIME = {
+  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml',
+  '.woff2': 'font/woff2', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.json': 'application/json',
+  '.md': 'text/plain; charset=utf-8', '.txt': 'text/plain; charset=utf-8', '.csv': 'text/plain; charset=utf-8', '.py': 'text/plain; charset=utf-8',
+  '.pdf': 'application/pdf',
+};
+
+function readBody(req, limit = 2 * 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', (c) => { size += c.length; if (size > limit) { reject(new Error('Body too large')); req.destroy(); } else chunks.push(c); });
+    req.on('end', () => { try { resolve(chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {}); } catch { reject(new Error('Invalid JSON')); } });
+    req.on('error', reject);
+  });
+}
+
+function send(res, status, body, headers = {}) {
+  const isObj = typeof body === 'object' && !Buffer.isBuffer(body);
+  res.writeHead(status, { 'content-type': isObj ? 'application/json' : 'text/plain; charset=utf-8', 'cache-control': 'no-store', ...headers });
+  res.end(isObj ? JSON.stringify(body) : body);
+}
+
+/**
+ * Starts the local server. A random per-launch token (cookie, SameSite=Strict) plus Host checks stop
+ * other websites or local processes from driving the agent, since it can run commands on this machine.
+ */
+function startServer({ port = 0, host = '127.0.0.1', token = crypto.randomBytes(24).toString('hex') } = {}) {
+  const store = new TaskStore();
+
+  const server = http.createServer(async (req, res) => {
+    try {
+      const url = new URL(req.url, 'http://localhost');
+      const hostHeader = (req.headers.host || '').replace(/:\d+$/, '');
+      if (!['127.0.0.1', 'localhost', '[::1]'].includes(hostHeader)) return send(res, 403, 'Bad host');
+
+      const cookies = Object.fromEntries((req.headers.cookie || '').split(';').map((c) => c.trim().split('=')).filter((p) => p.length === 2));
+      if (url.searchParams.get('token') === token && !url.pathname.startsWith('/api/')) {
+        res.writeHead(302, { 'set-cookie': `fh_token=${token}; Path=/; HttpOnly; SameSite=Strict`, location: url.pathname });
+        return res.end();
+      }
+      if (cookies.fh_token !== token && req.headers['x-freehand-token'] !== token) return send(res, 401, 'Open Freehand from the app (or the URL printed in the terminal).');
+
+      if (url.pathname.startsWith('/api/')) return await api(req, res, url);
+      return serveStatic(res, url.pathname);
+    } catch (e) {
+      send(res, 500, { error: e.message });
+    }
+  });
+
+  async function api(req, res, url) {
+    const parts = url.pathname.split('/').filter(Boolean).slice(1); // after "api"
+    const method = req.method;
+
+    if (parts[0] === 'settings') {
+      if (method === 'PUT') {
+        const next = applyPatch(loadSettings(), await readBody(req));
+        saveSettings(next);
+      }
+      return send(res, 200, { settings: publicSettings(loadSettings()), presets: PROVIDER_PRESETS, platform: process.platform });
+    }
+    if (parts[0] === 'models') {
+      try { return send(res, 200, { models: await listModels(loadSettings(), url.searchParams.get('provider') || 'ollama') }); }
+      catch (e) { return send(res, 200, { models: [], error: e.message }); }
+    }
+    if (parts[0] === 'tasks') {
+      if (parts.length === 1) {
+        if (method === 'GET') return send(res, 200, { tasks: store.list() });
+        if (method === 'POST') {
+          const body = await readBody(req);
+          const t = store.create();
+          if (body.text) t.start(String(body.text));
+          return send(res, 200, t.summary());
+        }
+      }
+      const task = store.get(parts[1]);
+      if (!task) return send(res, 404, { error: 'No such task' });
+      const sub = parts[2];
+      if (!sub && method === 'DELETE') { store.delete(task.id); return send(res, 200, { ok: true }); }
+      if (sub === 'events') {
+        res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });
+        const from = Number(url.searchParams.get('from')) || 0;
+        for (const ev of task.events.slice(from)) res.write(`id: ${ev.seq}\ndata: ${JSON.stringify(ev)}\n\n`);
+        task.subscribers.add(res);
+        const ping = setInterval(() => res.write(': ping\n\n'), 20000);
+        req.on('close', () => { clearInterval(ping); task.subscribers.delete(res); });
+        return;
+      }
+      if (sub === 'message' && method === 'POST') {
+        const body = await readBody(req);
+        if (!String(body.text || '').trim()) return send(res, 400, { error: 'Empty message' });
+        try { task.start(String(body.text)); } catch (e) { return send(res, 409, { error: e.message }); }
+        return send(res, 200, { ok: true });
+      }
+      if (sub === 'respond' && method === 'POST') {
+        const body = await readBody(req);
+        return send(res, task.respond(String(body.id), body.value) ? 200 : 404, { ok: true });
+      }
+      if (sub === 'stop' && method === 'POST') { task.stop(); return send(res, 200, { ok: true }); }
+      if (sub === 'files') return send(res, 200, { tree: listDir(task.workspace, url.searchParams.get('path') || '.', 4) });
+      if (sub === 'file') {
+        const rel = url.searchParams.get('path') || '';
+        let p;
+        try { p = safePath(task.workspace, rel); } catch { return send(res, 400, { error: 'Bad path' }); }
+        if (!fs.existsSync(p) || !fs.statSync(p).isFile()) return send(res, 404, { error: 'Not found' });
+        const ext = path.extname(p).toLowerCase();
+        const dl = url.searchParams.get('download') === '1';
+        // Files made by the agent are untrusted: never render HTML/SVG inline in our origin.
+        const type = MIME[ext] && !['.html', '.svg'].includes(ext) ? MIME[ext] : 'text/plain; charset=utf-8';
+        res.writeHead(200, {
+          'content-type': dl ? 'application/octet-stream' : type,
+          'content-disposition': dl ? `attachment; filename="${path.basename(p).replace(/"/g, '')}"` : 'inline',
+          'x-content-type-options': 'nosniff',
+          'content-security-policy': "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; sandbox",
+          'cache-control': 'no-store',
+        });
+        return fs.createReadStream(p).pipe(res);
+      }
+    }
+    return send(res, 404, { error: 'Not found' });
+  }
+
+  function serveStatic(res, pathname) {
+    const rel = pathname === '/' ? 'index.html' : decodeURIComponent(pathname).replace(/^\/+/, '');
+    const file = path.resolve(UI_DIR, rel);
+    if (!file.startsWith(UI_DIR + path.sep) || !fs.existsSync(file) || !fs.statSync(file).isFile()) return send(res, 404, 'Not found');
+    res.writeHead(200, { 'content-type': MIME[path.extname(file)] || 'application/octet-stream', 'cache-control': 'no-store' });
+    fs.createReadStream(file).pipe(res);
+  }
+
+  return new Promise((resolve, reject) => {
+    server.on('error', reject);
+    server.listen(port, host, () => {
+      const addr = server.address();
+      resolve({ server, store, token, port: addr.port, url: `http://127.0.0.1:${addr.port}/?token=${token}`, close: () => { for (const t of store.tasks.values()) t.stop(); server.close(); } });
+    });
+  });
+}
+
+module.exports = { startServer };
+
+if (require.main === module) {
+  const port = Number(process.env.FREEHAND_PORT) || 4173;
+  startServer({ port }).then((s) => {
+    console.log(`\nFreehand is running. Open this link in your browser:\n\n  ${s.url}\n`);
+  }).catch((e) => { console.error('Could not start:', e.message); process.exit(1); });
+}

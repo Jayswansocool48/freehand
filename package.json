@@ -1,0 +1,82 @@
+{
+  "name": "freehand-agent",
+  "productName": "Freehand",
+  "version": "0.1.0",
+  "description": "Autonomous AI agent (plan, search, browse, code, files) that runs on free models: Ollama local or free cloud tiers.",
+  "main": "electron/main.js",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "serve": "node src/server/index.js",
+    "test": "node --test test/agent.test.js",
+    "setup-browser": "node scripts/setup-browser.js",
+    "dist:linux": "electron-builder --linux AppImage --publish never",
+    "dist:win": "electron-builder --win nsis --publish never",
+    "release": "electron-builder --publish always"
+  },
+  "dependencies": {
+    "@phosphor-icons/core": "^2.1.1",
+    "playwright-core": "^1.49.0",
+    "electron-updater": "^6.6.2"
+  },
+  "devDependencies": {
+    "electron": "^45.3.2",
+    "electron-builder": "^26.18.0"
+  },
+  "build": {
+    "appId": "com.twobyfour.freehand",
+    "productName": "Freehand",
+    "files": [
+      "electron/**",
+      "src/**",
+      "ui/**",
+      "package.json",
+      "build/icon.png"
+    ],
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Utility",
+      "icon": "build/icon.png",
+      "artifactName": "Freehand-${version}.${ext}",
+      "synopsis": "Autonomous AI agent on free models"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico",
+      "artifactName": "Freehand-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "createStartMenuShortcut": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "Freehand",
+      "runAfterFinish": true,
+      "deleteAppDataOnUninstall": false
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "Jayswansocool48",
+      "repo": "freehand",
+      "releaseType": "release"
+    },
+    "directories": {
+      "buildResources": "build"
+    },
+    "icon": "build/icon.png"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Jayswansocool48/freehand.git"
+  },
+  "author": "TwoByFour Games"
+}
