@@ -4,6 +4,8 @@ const path = require('path');
 const { safePath, truncate } = require('../core/util');
 const { webSearch, fetchPage } = require('./web');
 const { runCommand, runPython } = require('./exec');
+const { buildGlb, modelInfo, SHAPES } = require('./model3d');
+const { previewUrl } = require('../server/preview');
 
 const obj = (properties, required = []) => ({ type: 'object', properties, required });
 const str = (description) => ({ type: 'string', description });
@@ -164,6 +166,64 @@ function buildTools() {
       async run(a, ctx) {
         const r = await runPython(String(a.code), { workspace: ctx.workspace, timeoutMs: Math.min(600, Number(a.timeout_s) || 120) * 1000, signal: ctx.signal, onData: (s) => ctx.emit('terminal', { data: s }) });
         return `${r.timedOut ? '[timed out and was killed]\n' : ''}exit code: ${r.code}\n${r.output}`;
+      },
+    },
+    {
+      name: 'play_test',
+      icon: 'game-controller',
+      description:
+        'Run a game or web page from the workspace in a real browser and test it like a player. Returns uncaught errors, console errors, files that failed to load, visible text and a screenshot. ' +
+        'Optional "actions" are inputs played in order: "click" (centre), "click X Y", "key ArrowLeft 500" (hold ms), "key Space", "type hello", "mouse X Y", "wait 1000". ' +
+        'Run it after every change to a game and fix every error it reports. The user can play the same file in the Play tab.',
+      parameters: obj({ path: str('HTML file in the workspace, default index.html'), actions: { type: 'array', items: { type: 'string' }, description: 'inputs to play, e.g. ["click", "key ArrowRight 800", "key Space"]' }, seconds: num('extra seconds to let it run before the screenshot, default 3') }),
+      label: (a) => `Play-testing ${a.path || 'index.html'}`,
+      async run(a, ctx) {
+        const rel = String(a.path || 'index.html');
+        const p = safePath(ctx.workspace, rel);
+        if (!fs.existsSync(p)) throw new Error(`No such file: ${rel}. Write the game first.`);
+        const page = path.relative(ctx.workspace, fs.statSync(p).isDirectory() ? path.join(p, 'index.html') : p).replace(/\\/g, '/');
+        const url = await previewUrl(ctx.workspace, page);
+        ctx.emit('play', { path: page });
+        return ctx.browser().playTest({ url, actions: a.actions, seconds: a.seconds == null ? 3 : Number(a.seconds) });
+      },
+    },
+    {
+      name: 'make_model',
+      icon: 'cube',
+      description:
+        `Build a low-poly 3D model (.glb, loads with three.js GLTFLoader) out of simple shapes. Shapes: ${SHAPES.join(', ')}. ` +
+        'Each part: {"shape", "size": [width, height, depth] (the box the shape fills), "position": [x, y, z] (its centre), "on": "<name of an earlier part>" to rest it on top of that part (then x and z are offsets from that part\'s centre and y is ignored), "rotation": [x, y, z] degrees, "color": "#rrggbb", optional "name", "flat": true for a faceted look, "roughness", "metalness", "emissive": "#rrggbb", "opacity", "segments"}. ' +
+        'Units are metres and y is up; put the model\'s base at y = 0 so it stands on the ground. Wedge is a ramp sloping down toward +z. Torus lies flat; size [outer width, tube thickness, outer depth]. ' +
+        'Example: a tree is a "cylinder" trunk {"size":[0.3,1.2,0.3],"position":[0,0.6,0],"color":"#8b5a2b"} and a "cone" top {"size":[1.4,1.8,1.4],"position":[0,2.1,0],"color":"#3f8f3a","flat":true,"segments":7}.',
+      parameters: obj({ path: str('where to save, e.g. assets/tree.glb'), name: str('model name'), parts: { type: 'array', items: { type: 'object' }, description: 'the shapes that make up the model' } }, ['path', 'parts']),
+      label: (a) => `Making 3D model ${a.path}`,
+      async run(a, ctx) {
+        let rel = String(a.path || 'assets/model.glb');
+        if (!/\.glb$/i.test(rel)) rel = rel.replace(/\.[a-z0-9]+$/i, '') + '.glb';
+        const p = safePath(ctx.workspace, rel);
+        const r = buildGlb({ name: a.name || path.basename(rel, '.glb'), parts: a.parts });
+        fs.mkdirSync(path.dirname(p), { recursive: true });
+        fs.writeFileSync(p, r.glb);
+        const out = path.relative(ctx.workspace, p).replace(/\\/g, '/');
+        ctx.emit('file', { path: out });
+        ctx.emit('model', { path: out });
+        const size = r.bounds.max.map((v, k) => (v - r.bounds.min[k]).toFixed(2)).join(' × ');
+        const lifted = r.lifted ? ` It went below the ground, so it was lifted ${r.lifted.toFixed(2)} m to stand on y = 0.` : '';
+        const saved = `Saved ${out}: ${r.parts} parts, ${r.triangles} triangles, size ${size} m (bottom at y = 0).${lifted} The user can see it in the viewer. Load it with GLTFLoader from "./${out}".`;
+        return r.warnings.length ? `${saved}\nPROBLEMS, fix them and call make_model again:\n- ${r.warnings.join('\n- ')}` : saved;
+      },
+    },
+    {
+      name: 'model_info',
+      icon: 'cube',
+      description: 'Describe a 3D model file in the workspace (.glb, .gltf, .obj, .stl, .fbx): size, parts, materials, rig and animation names. Use it on models the user attached before putting them in a game, so you scale and animate them correctly.',
+      parameters: obj({ path: str('model file, e.g. assets/hero.glb') }, ['path']),
+      label: (a) => `Inspecting model ${a.path}`,
+      async run(a, ctx) {
+        const p = safePath(ctx.workspace, a.path);
+        if (!fs.existsSync(p) || fs.statSync(p).isDirectory()) throw new Error(`No such file: ${a.path}`);
+        ctx.emit('model', { path: path.relative(ctx.workspace, p).replace(/\\/g, '/') });
+        return modelInfo(p);
       },
     },
     {

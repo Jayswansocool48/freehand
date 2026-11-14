@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const { chat } = require('./providers');
-const { buildTools } = require('../tools');
+const { buildTools, listDir } = require('../tools');
 const { BrowserSession } = require('../tools/browser');
 const { stripThinking, extractJson, truncate, safePath } = require('./util');
 
@@ -27,10 +27,11 @@ Given the user's request, reply with ONLY a JSON object, no other text:
 - If the request needs real work: {"title": "<3-6 word title>", "steps": ["<imperative step>", ...]} with ${effort.steps} concrete steps.
 - If it is a simple question or chat that needs no tools: {"title": "<3-6 word title>", "answer": "<your complete answer in Markdown>"}.
 Prefer the fewest steps that get a verified result. Do not include a "write the final answer" step; finishing is automatic.
+Games and interactive pages: plan the files, make any 3D models it needs with make_model (or use models the user attached), build it, then end with "Play-test with play_test and fix every error".
 ${effort.work}`;
 }
 
-function systemPrompt({ plan, mode, tools, effort }) {
+function systemPrompt({ plan, mode, tools, effort, files }) {
   const lines = [
     `You are Freehand, an autonomous agent that completes tasks end to end on the user's own computer. Today is ${new Date().toDateString()}. Platform: ${process.platform}.`,
     `Your workspace folder is the current directory; every file path you use is relative to it. Save deliverables (reports, code, data, HTML) as files there, not just in chat.`,
@@ -45,6 +46,17 @@ function systemPrompt({ plan, mode, tools, effort }) {
     '- Use ask_user only when you are genuinely blocked.',
     '- The final answer (finish.message) should be clear, concise Markdown that answers the request and points to the files you made.',
     `- ${effort.work}`,
+    '',
+    'Games, 3D and web pages:',
+    '- Build them as files in the workspace: index.html plus .js/.css files and an assets/ folder. Use relative paths ("./assets/tree.glb") so they run anywhere.',
+    '- For 3D use three.js from a CDN with an import map: {"imports": {"three": "https://unpkg.com/three@0.180.0/build/three.module.js", "three/addons/": "https://unpkg.com/three@0.180.0/examples/jsm/"}}. Load models with GLTFLoader (and OBJLoader/FBXLoader for those formats). For 2D, a plain <canvas> is enough.',
+    '- Need a model nobody gave you? Make it with make_model (low-poly shapes, saved as .glb). Models the user attached are in assets/; run model_info on them first to learn their size and animation names.',
+    '- Test like a player: after writing or changing a game, run play_test (with inputs such as "click", "key ArrowRight 600", "key Space") and fix every error and failed file it reports, then test again. Do not finish while play_test still shows errors.',
+    '- Make the controls and goal clear on screen, and let the player restart.',
+    '- If a model or file you need is missing, make it or use a simple shape. Never leave a game broken because an asset failed to load.',
+    '',
+    'Files already in the workspace:',
+    files || '(none yet)',
     '',
     'PLAN (status in brackets):',
     ...plan.map((s, i) => `${i + 1}. [${s.status}] ${s.text}`),
@@ -63,6 +75,12 @@ function systemPrompt({ plan, mode, tools, effort }) {
 
 /** Recognises {"tool": "...", "args": {...}} inside free text (for models without native tool calling). */
 function parseAction(text, toolNames) {
+  // Small models sometimes write a call as code: step_done({"summary": "..."}) or `finish {...}`.
+  const m = String(text || '').match(/(?:^|\n)\s*`?(\w+)`?\s*\(?\s*(\{[\s\S]*\})\s*\)?/);
+  if (m && toolNames.includes(m[1])) {
+    const args = extractJson(m[2]);
+    if (args && !(args.tool || args.name)) return { thought: '', call: { id: '', name: m[1], args } };
+  }
   const j = extractJson(text);
   if (!j) return null;
   const name = j.tool || j.name || j.action || (j.function && j.function.name);
@@ -99,6 +117,8 @@ class Agent {
     this.browserSession = null;
     this.lastCalls = [];
     this.effort = effortOf(settings);
+    this.game = { changed: false, errors: false, nudges: 0 }; // tracks whether the game was play-tested since it last changed
+    this.failStreak = 0;
   }
 
   browser() {
@@ -185,7 +205,9 @@ class Agent {
   async decide() {
     const mode = this.toolMode();
     const names = this.tools.map((t) => t.name);
-    const messages = [{ role: 'system', content: systemPrompt({ plan: this.plan, mode, tools: this.tools, effort: this.effort }) }, ...this.render(mode)];
+    let files = '';
+    try { files = truncate(listDir(this.workspace, '.', 3), 1500); } catch { /* workspace not readable */ }
+    const messages = [{ role: 'system', content: systemPrompt({ plan: this.plan, mode, tools: this.tools, effort: this.effort, files }) }, ...this.render(mode)];
     let r;
     try {
       r = await this.callModel(messages, mode === 'native' ? this.tools : null);
@@ -261,6 +283,7 @@ class Agent {
   async loop() {
     const max = Math.max(5, Math.min(250, Math.round(this.settings.maxSteps * this.effort.turns)));
     let retries = 0;
+    let textNudges = 0;
     for (let turn = 0; turn < max; turn++) {
       if (this.signal.aborted) throw new Error('Aborted');
       const d = await this.decide();
@@ -272,7 +295,16 @@ class Agent {
       }
       retries = 0;
 
-      if (d.text !== undefined) return this.finish(d.text, []);
+      if (d.text !== undefined) {
+        // A plain reply ends the task only when the plan is done; otherwise the model forgot to call a tool.
+        const open = this.plan.find((s) => s.status !== 'done');
+        const unchecked = open ? null : this.uncheckedGame();
+        if ((open || unchecked) && textNudges++ < 2) {
+          this.history.push({ role: 'assistant', content: d.text }, { role: 'user', content: unchecked || `You replied with text, but the plan is not finished (current step: "${open.text}"). Do the work by calling a tool. Call step_done when a step is complete, and finish only at the end.` });
+          continue;
+        }
+        return this.finish(d.text, []);
+      }
 
       const { call, thought } = d;
       if (thought) this.emit('thought', { text: thought });
@@ -280,6 +312,12 @@ class Agent {
       const tool = this.toolByName[call.name];
 
       if (call.name === 'finish') {
+        const unchecked = this.uncheckedGame();
+        if (unchecked) {
+          this.history.push({ role: 'tool', id: call.id, name: call.name, content: unchecked });
+          this.notice('Freehand is testing its work before finishing.');
+          continue;
+        }
         this.history.pop(); // the final answer is recorded as a plain assistant message
         return this.finish(String(call.args.message || ''), Array.isArray(call.args.files) ? call.args.files : []);
       }
@@ -319,12 +357,34 @@ class Agent {
         output = `ERROR: ${e.message}`;
       }
       this.emit('tool_result', { id: call.id, ok, preview: truncate(output, TOOL_RESULT_FOR_UI) });
+      this.trackGame(call, ok, output);
+      this.failStreak = ok ? 0 : this.failStreak + 1;
+      if (this.failStreak === 3) {
+        output += '\n\nThree tool calls in a row have failed. Stop and think: re-read the errors, check your assumptions (file names, paths, what is installed), and try a different approach or call revise_plan.';
+      }
       this.history.push({ role: 'tool', id: call.id, name: call.name, content: truncate(output, TOOL_RESULT_FOR_MODEL) });
     }
     const msg = `I reached the step limit (${max}) before finishing. Progress so far is in the workspace; you can reply "continue" to keep going.`;
     this.emit('final', { message: msg, files: [] });
     this.emit('status', { status: 'stopped' });
     return { status: 'stopped', message: msg };
+  }
+
+  /** Notes game edits and play-test results, so the agent cannot finish with an untested or broken game. */
+  trackGame(call, ok, output) {
+    const p = String((call.args && call.args.path) || '');
+    if (['file_write', 'file_edit'].includes(call.name) && ok && /\.(html?|m?js|css)$/i.test(p)) this.game.changed = true;
+    if (call.name === 'play_test' && ok) { this.game.changed = false; this.game.errors = /^(ERRORS|FILES THAT FAILED)/m.test(output); }
+  }
+
+  uncheckedGame() {
+    if (this.effort === EFFORT.low || this.game.nudges >= 2) return null;
+    let hasPage = false;
+    try { hasPage = fs.readdirSync(this.workspace).some((f) => /\.html?$/i.test(f)); } catch { /* no workspace */ }
+    if (!hasPage) return null;
+    if (this.game.changed) { this.game.nudges++; return 'Not finished yet: you changed the game or page since it was last tested. Run play_test on it (with a few inputs), fix anything it reports, then finish.'; }
+    if (this.game.errors) { this.game.nudges++; return 'Not finished yet: the last play_test reported errors or files that failed to load. Fix them and run play_test again, then finish.'; }
+    return null;
   }
 
   context() {

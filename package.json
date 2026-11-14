@@ -1,23 +1,25 @@
 {
   "name": "freehand-agent",
   "productName": "Freehand",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Autonomous AI agent (plan, search, browse, code, files) that runs on free models: Ollama local or free cloud tiers.",
   "main": "electron/main.js",
   "license": "MIT",
   "scripts": {
     "start": "electron .",
     "serve": "node src/server/index.js",
-    "test": "node --test test/agent.test.js",
+    "test": "node --test test/agent.test.js test/game.test.js",
     "setup-browser": "node scripts/setup-browser.js",
-    "dist:linux": "electron-builder --linux AppImage --publish never",
-    "dist:win": "electron-builder --win nsis --publish never",
-    "release": "electron-builder --publish always"
+    "dist:linux": "npm run vendor && electron-builder --linux AppImage --publish never",
+    "dist:win": "npm run vendor && electron-builder --win nsis --publish never",
+    "release": "npm run vendor && electron-builder --publish always",
+    "vendor": "node scripts/vendor-three.js"
   },
   "dependencies": {
     "@phosphor-icons/core": "^2.1.1",
+    "electron-updater": "^6.6.2",
     "playwright-core": "^1.49.0",
-    "electron-updater": "^6.6.2"
+    "three": "^0.180.0"
   },
   "devDependencies": {
     "electron": "^45.3.2",
@@ -30,6 +32,7 @@
       "electron/**",
       "src/**",
       "ui/**",
+      "vendor/**",
       "package.json",
       "build/icon.png"
     ],

@@ -3,7 +3,9 @@
 A Manus-style autonomous agent that runs on **free models**. Give it a goal; it plans, searches the web, reads pages, drives a real browser, writes files and runs code, and hands back a finished result. No credits.
 
 - **Models:** Ollama (local, unlimited) and free cloud tiers (OpenRouter `:free` models, Groq, Google Gemini). Switch in Settings; set fallback providers so a rate limit on one free tier moves the task to the next.
-- **Tools:** web search, page fetch, Playwright browser (click/type/scroll/screenshot), file read/write/edit, shell, Python, ask-the-user.
+- **Tools:** web search, page fetch, Playwright browser (click/type/scroll/screenshot), file read/write/edit, shell, Python, ask-the-user, and for games: `play_test`, `make_model` and `model_info`.
+- **Games:** Freehand builds browser games (three.js for 3D, canvas for 2D), plays them itself with `play_test` (inputs, errors, failed files, a screenshot) and fixes what breaks. It will not finish while a game it changed is untested or still has errors. You play the result in the **Play** tab of the Computer panel, full screen, or in your own browser.
+- **3D models:** `make_model` builds low-poly `.glb` models from shapes (box, sphere, cylinder, cone, pyramid, wedge, torus) and warns about parts that float or are buried. Attach your own models (`.glb`, `.gltf`, `.obj`, `.fbx`, `.stl`), images or sounds with the paperclip or by dropping them on the window; they land in the task's `assets/` folder and `model_info` tells the agent their size and animation names. Any model opens in the built-in 3D viewer.
 - **UI:** laid out like Hatch and Claude's desktop app: a sidebar of recent tasks, a home screen with one composer box, the agent's work in a centered thread, a live plan checklist, the Computer panel (browser screenshots, command output, files), and full-page Settings with sections. Ctrl+K searches tasks and actions; deleting a task shows an Undo toast.
 - **Effort:** Low, Medium, High or Max, like Claude's effort setting. Pick it in the composer or in Settings > Capabilities. Higher effort makes longer plans, gives the agent more tool steps (Low 40% of your step limit, Medium 70%, High 100%, Max 250%), and tells it to check more sources and review its work. Lower effort finishes faster.
 - **Platforms:** Windows and Linux (Bazzite/Fedora/Ubuntu/Pop!_OS). Electron app + plain Node core.
@@ -40,6 +42,12 @@ Keys can also come from the environment: `OPENROUTER_API_KEY`, `GROQ_API_KEY`, `
 
 **Tool mode.** "Automatic" tries native tool calling and switches to a JSON protocol if the model rejects it. Force **JSON mode** for small local models that handle tool calling badly.
 
+## Local AI models and freehand-v2
+
+Settings > Models > **Local AI models** lists what Ollama has, switches between models, downloads new ones by name, and imports a `.gguf` file you already have.
+
+**freehand-v2** is Freehand's own Ollama model: a base model you pick (default `qwen3:4b-instruct`, fits a 4 GB graphics card) with instructions and settings for building games, making 3D models with `make_model`, using attached models and play-testing (16K context, low temperature). Press **Build it**; it takes a few seconds when the base model is already downloaded. Outside Freehand, `ollama run freehand-v2 "a low-poly street lamp"` replies with a `make_model` JSON spec.
+
 ## Be realistic about quality
 
 Manus runs frontier models. Free and small models are noticeably weaker: expect more retries, shorter plans, and occasional wrong turns. What helps most: a 14B+ local model or a 70B free cloud model, concrete requests ("write X as a .md file"), and replying with corrections mid-task. The agent does not send screenshots to the model (most free models cannot see images); it works from the page's text and numbered element list, and shows screenshots to you.
@@ -52,6 +60,10 @@ This agent runs commands **on your real machine**, not in a VM.
 - File tools are confined to the task's workspace folder (symlink escapes are blocked). Shell/Python start in that folder but are **not** sandboxed: an approved command can touch anything your user can.
 - The local server binds to `127.0.0.1`, requires a per-launch secret cookie, and rejects foreign `Host` headers, so websites and other apps cannot drive the agent.
 - API keys are stored in plain text in `settings.json` (owner-only permissions on Linux; on Windows it sits in your user profile). Files the agent writes are served as plain text, never rendered as HTML.
+
+## Games and previews: how it stays safe
+
+Games run on a second local server with its own port, so they are a different origin from the app. Its URLs carry a random per-launch token, and the app's API refuses any request that comes from another origin. A game cannot read your tasks, settings or keys, or tell the agent to run commands.
 
 ## Data
 

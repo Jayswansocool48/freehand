@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; font-src 'self'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; font-src 'self'; frame-src http://127.0.0.1:*">
   <title>Freehand</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256'%3E%3Crect width='256' height='256' rx='56' fill='%231e293b'/%3E%3Cpath d='M144 32 64 144h56l-8 80 80-112h-56z' fill='%23f8fafc'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="styles.css">
@@ -89,6 +89,7 @@
       <div class="cp-title"><span data-icon="desktop"></span>Freehand's computer</div>
       <div class="segmented" role="radiogroup" aria-label="Computer view">
         <button class="cp-tab" data-cp="live" role="radio" aria-checked="true">Live</button>
+        <button class="cp-tab" data-cp="play" role="radio" aria-checked="false">Play</button>
         <button class="cp-tab" data-cp="files" role="radio" aria-checked="false">Files</button>
       </div>
       <button id="cp-close" class="icon-btn" aria-label="Close panel"><span data-icon="x"></span></button>
@@ -107,9 +108,12 @@
 <!-- One composer, moved between the home screen and the task view -->
 <template id="composer-tpl">
   <form id="composer" class="composer-box" autocomplete="off">
+    <div id="attachments" class="attachments" hidden></div>
     <textarea id="input" rows="1" placeholder="Describe a task" aria-label="Task or reply"></textarea>
     <div class="composer-foot">
       <div class="grow">
+        <button type="button" id="attach" class="icon-btn" title="Attach files: 3D models, images, sounds" aria-label="Attach files"><span data-icon="paperclip"></span></button>
+        <input type="file" id="attach-input" multiple hidden>
         <button type="button" id="model-chip" class="picker" aria-haspopup="menu" aria-expanded="false" title="Choose model"></button>
         <button type="button" id="effort-chip" class="picker" aria-haspopup="menu" aria-expanded="false" title="Effort: how hard Freehand works on each task"></button>
         <button type="button" id="safety-chip" class="picker" aria-haspopup="menu" aria-expanded="false" title="Shell and Python commands: ask first, or run without asking"></button>

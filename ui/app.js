@@ -20,6 +20,8 @@
     sel: -1, live: true, panelOpen: false, panelTab: 'live',
     plan: [], lastSeq: -1,
     hidden: new Set(),  // tasks deleted but still undoable
+    playPath: null, playNonce: 0, // what the Play tab runs: a page/game, or a 3D model in the viewer
+    attach: [], draft: null,      // files attached in the composer; draft = task made to hold them before the first message
   };
 
   /* ---------- API ---------- */
@@ -215,11 +217,13 @@
   }
   function newTask() {
     state.current = null;
+    state.attach = []; renderAttachments();
     resetView();
     showView('home');
     $('#input').focus();
   }
   function openTask(id) {
+    if (state.current !== id) { state.attach = []; renderAttachments(); state.playPath = null; }
     state.current = id;
     resetView();
     showView('task');
@@ -271,8 +275,8 @@
   }
 
   /* ---------- Frames (what the Computer panel replays) ---------- */
-  const KIND = { browser: 'browser', shell: 'terminal', python: 'terminal', file_write: 'editor', file_edit: 'editor', file_read: 'editor', file_list: 'editor', web_search: 'search', web_fetch: 'search' };
-  const KIND_NAME = { browser: 'the browser', terminal: 'the terminal', editor: 'the editor', search: 'search', text: 'a tool' };
+  const KIND = { play_test: 'game', make_model: 'model', model_info: 'model', browser: 'browser', shell: 'terminal', python: 'terminal', file_write: 'editor', file_edit: 'editor', file_read: 'editor', file_list: 'editor', web_search: 'search', web_fetch: 'search' };
+  const KIND_NAME = { game: 'the game tester', model: 'the model maker', browser: 'the browser', terminal: 'the terminal', editor: 'the editor', search: 'search', text: 'a tool' };
 
   function addFrame(ev) {
     const frame = { id: ev.id, name: ev.name, label: ev.label, icon: ev.icon, args: ev.args || {}, kind: KIND[ev.name] || 'text', status: 'running', output: '', live: '', shot: null, row: null };
@@ -290,6 +294,8 @@
     const body = $('#cp-body');
     const tl = $('#cp-timeline');
     $$('.cp-tab').forEach((t) => t.setAttribute('aria-checked', String(t.dataset.cp === state.panelTab)));
+    if (state.panelTab === 'play') { tl.hidden = true; return renderPlay(); }
+    delete body.dataset.play;
     if (state.panelTab === 'files') { tl.hidden = true; $('#cp-status').textContent = ''; return renderFiles(); }
     tl.hidden = false;
     const n = state.frames.length;
@@ -309,7 +315,18 @@
     if (running) status.append(el('span', 'live-dot'));
     status.append(document.createTextNode(`${running ? 'Using' : 'Used'} ${KIND_NAME[f.kind]}  ·  step ${state.sel + 1} of ${n}`));
     const out = f.output || f.live;
-    if (f.kind === 'browser') {
+    if (f.kind === 'game' || f.kind === 'model') {
+      const target = f.kind === 'game' ? (f.args.path || 'index.html') : f.args.path || '';
+      const bar = el('div', 'cp-bar'); bar.append(ic(f.kind === 'game' ? 'game-controller' : 'cube'), el('span', 'grow', esc(target)));
+      if (target && !running) {
+        const go = el('button', 'btn', f.kind === 'game' ? 'Play it yourself' : 'View in 3D'); go.type = 'button';
+        go.addEventListener('click', () => openPlay(target));
+        bar.append(go);
+      }
+      body.append(bar);
+      if (f.shot) { const img = el('img', 'cp-shot'); img.alt = 'Screenshot of the game'; img.src = fileUrl(f.shot); body.append(img); }
+      body.append(preBlock(out || (f.kind === 'game' ? 'Starting the game' : 'Working'), 'cp-pre'));
+    } else if (f.kind === 'browser') {
       const url = (out.match(/^URL: (.*)$/m) || [])[1] || f.args.url || '';
       const bar = el('div', 'cp-bar'); bar.append(ic('globe'), document.createTextNode(url || f.label));
       body.append(bar);
@@ -335,34 +352,98 @@
   }
   const preBlock = (text, cls) => { const p = el('pre', cls); p.textContent = text; return p; };
 
-  async function renderFiles() {
-    const body = $('#cp-body');
-    body.innerHTML = '';
-    if (!state.current) return body.append(el('div', 'cp-empty', 'Files appear here.'));
+  /** The task's files as [{ rel, name, depth, isDir }], from the server's indented listing. */
+  async function fileTree() {
+    if (!state.current) return [];
     const { tree } = await api(`/tasks/${state.current}/files`).catch(() => ({ tree: '' }));
     const lines = tree && tree !== '(empty)' ? tree.split('\n') : [];
-    if (!lines.length) return body.append(el('div', 'cp-empty', 'Files Freehand makes appear here.'));
-    const ul = el('ul', 'files-list');
     const stack = [];
-    for (const line of lines) {
+    return lines.map((line) => {
       const depth = line.match(/^ */)[0].length / 2;
       const name = line.trim().replace(/ \(\d+ bytes\)$/, '');
       stack.length = depth;
       const isDir = name.endsWith('/');
       stack[depth] = isDir ? name.slice(0, -1) : null;
-      const li = el('li', isDir ? 'dir' : '');
-      li.style.paddingLeft = 10 + depth * 16 + 'px';
-      li.append(ic(isDir ? 'folder-open' : 'file-text'), el('span', 'nm', esc(name.replace(/\/$/, ''))));
-      if (!isDir) {
-        const rel = [...stack.slice(0, depth).filter(Boolean), name].join('/');
-        const dl = el('a'); dl.href = fileUrl(rel, true); dl.title = 'Download'; dl.setAttribute('aria-label', `Download ${name}`); dl.append(ic('download'));
+      return { depth, isDir, name: name.replace(/\/$/, ''), rel: [...stack.slice(0, depth).filter(Boolean), name.replace(/\/$/, '')].join('/') };
+    });
+  }
+  const isPage = (f) => /\.html?$/i.test(f);
+  const isModel = (f) => /\.(glb|gltf|obj|fbx|stl)$/i.test(f);
+
+  async function renderFiles() {
+    const body = $('#cp-body');
+    const files = await fileTree();
+    if (state.panelTab !== 'files') return;
+    body.innerHTML = '';
+    if (!state.current) return body.append(el('div', 'cp-empty', 'Files appear here.'));
+    if (!files.length) return body.append(el('div', 'cp-empty', 'Files Freehand makes, and files you attach, appear here.'));
+    const ul = el('ul', 'files-list');
+    for (const f of files) {
+      const li = el('li', f.isDir ? 'dir' : '');
+      li.style.paddingLeft = 10 + f.depth * 16 + 'px';
+      li.append(ic(f.isDir ? 'folder-open' : isModel(f.name) ? 'cube' : isPage(f.name) ? 'game-controller' : 'file-text'), el('span', 'nm', esc(f.name)));
+      if (!f.isDir) {
+        if (isPage(f.name) || isModel(f.name)) {
+          const play = el('button', 'btn btn-quiet', isModel(f.name) ? 'View' : 'Play'); play.type = 'button';
+          play.addEventListener('click', (e) => { e.stopPropagation(); openPlay(f.rel); });
+          li.append(play);
+        }
+        const dl = el('a'); dl.href = fileUrl(f.rel, true); dl.title = 'Download'; dl.setAttribute('aria-label', `Download ${f.name}`); dl.append(ic('download'));
         dl.addEventListener('click', (e) => e.stopPropagation());
         li.append(dl);
-        li.addEventListener('click', () => previewFile(rel));
+        li.addEventListener('click', () => (isModel(f.name) ? openPlay(f.rel) : previewFile(f.rel)));
       }
       ul.append(li);
     }
     body.append(ul);
+  }
+
+  /* ---------- Play tab: runs what Freehand built, on a separate origin, sandboxed ---------- */
+  function openPlay(rel) {
+    state.playPath = rel;
+    state.playNonce++;
+    if (state.view !== 'task' && state.current) openTask(state.current);
+    setPanel(true);
+    state.panelTab = 'play';
+    renderPanel();
+  }
+  async function renderPlay() {
+    const body = $('#cp-body');
+    const status = $('#cp-status');
+    const files = (await fileTree()).filter((f) => !f.isDir && (isPage(f.name) || isModel(f.name))).map((f) => f.rel);
+    if (state.panelTab !== 'play') return;
+    if (!state.playPath || !files.includes(state.playPath)) state.playPath = files.find((f) => /(^|\/)index\.html?$/i.test(f)) || files.find(isPage) || files[0] || null;
+    const key = `${state.current}|${state.playPath}|${state.playNonce}`;
+    if (body.dataset.play === key && body.querySelector('iframe')) return; // keep the running game
+    body.dataset.play = key;
+    body.innerHTML = '';
+    status.innerHTML = '';
+    if (!state.current || !state.playPath) {
+      body.append(el('div', 'cp-empty', 'Games, pages and 3D models Freehand builds run here, so you can play them without leaving the app. Ask for a game, or attach a model with the paperclip.'));
+      return;
+    }
+    const { url } = await api(`/tasks/${state.current}/preview?path=${encodeURIComponent(state.playPath)}`).catch(() => ({ url: '' }));
+    if (state.panelTab !== 'play' || body.dataset.play !== key) return;
+    const bar = el('div', 'cp-bar play-bar');
+    const pick = el('select'); pick.setAttribute('aria-label', 'What to play');
+    for (const f of files) { const o = el('option', '', esc(f)); o.value = f; pick.append(o); }
+    pick.value = state.playPath;
+    pick.addEventListener('change', () => { state.playPath = pick.value; state.playNonce++; renderPanel(); });
+    const btn = (name, label, fn) => { const b = el('button', 'icon-btn'); b.type = 'button'; b.title = label; b.setAttribute('aria-label', label); b.append(ic(name)); b.addEventListener('click', fn); return b; };
+    const frame = el('iframe', 'cp-frame');
+    frame.title = state.playPath;
+    // A different origin from the app, so allow-same-origin only gives the game its own storage, not ours.
+    frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-pointer-lock allow-forms allow-modals');
+    frame.setAttribute('allow', 'fullscreen; autoplay; gamepad; accelerometer; gyroscope');
+    frame.allowFullscreen = true;
+    bar.append(pick,
+      btn('arrow-clockwise', 'Restart', () => { state.playNonce++; renderPanel(); }),
+      btn('arrows-out', 'Full screen', () => frame.requestFullscreen && frame.requestFullscreen().catch(() => {})),
+      btn('arrow-square-out', 'Open in your browser', () => url && window.open(url, '_blank')));
+    body.append(bar, frame);
+    frame.src = url;
+    frame.addEventListener('load', () => { try { frame.focus(); } catch { /* cross-origin */ } });
+    status.textContent = isModel(state.playPath) ? 'Drag to turn the model, scroll to zoom.' : 'Click the game to give it your keyboard and mouse.';
   }
   const fileUrl = (rel, download) => `/api/tasks/${state.current}/file?path=${encodeURIComponent(rel)}${download ? '&download=1' : ''}`;
   async function previewFile(rel) {
@@ -422,7 +503,7 @@
         break;
       }
       case 'terminal': { const f = [...state.frames].reverse().find((x) => x.kind === 'terminal' && x.status === 'running'); if (f) { f.live = (f.live + ev.data).slice(-20000); if (state.frames[state.sel] === f) renderPanel(); } break; }
-      case 'shot': { const f = [...state.frames].reverse().find((x) => x.kind === 'browser' && x.status === 'running'); if (f) { f.shot = ev.path; if (state.frames[state.sel] === f) renderPanel(); } break; }
+      case 'shot': { const f = [...state.frames].reverse().find((x) => (x.kind === 'browser' || x.kind === 'game') && x.status === 'running'); if (f) { f.shot = ev.path; if (state.frames[state.sel] === f) renderPanel(); } break; }
       case 'tool_result': {
         const f = state.tools.get(ev.id);
         if (!f) break;
@@ -433,6 +514,8 @@
         break;
       }
       case 'file': if (state.panelTab === 'files') renderPanel(); break;
+      case 'play': state.playPath = ev.path; state.playNonce++; if (state.panelTab === 'play') renderPanel(); break;
+      case 'model': if (!state.playPath || isModel(state.playPath)) { state.playPath = ev.path; state.playNonce++; if (state.panelTab === 'play') renderPanel(); } break;
       case 'approval': add(approvalCard(ev)); break;
       case 'ask': add(askCard(ev)); break;
       case 'resolved': { const c = document.querySelector(`[data-pid="${ev.id}"]`); if (c) { c.classList.add('resolved'); $$('button,input', c).forEach((b) => (b.disabled = true)); } break; }
@@ -475,14 +558,26 @@
 
   function fileKind(name) {
     const ext = (name.split('.').pop() || '').toLowerCase();
-    return { md: 'Markdown', txt: 'Text', csv: 'CSV', json: 'JSON', html: 'HTML', py: 'Python', js: 'JavaScript', png: 'Image', jpg: 'Image', svg: 'SVG' }[ext] || ext.toUpperCase() || 'File';
+    return { glb: '3D model', gltf: '3D model', obj: '3D model', fbx: '3D model', stl: '3D model', md: 'Markdown', txt: 'Text', csv: 'CSV', json: 'JSON', html: 'Web page or game', py: 'Python', js: 'JavaScript', png: 'Image', jpg: 'Image', svg: 'SVG' }[ext] || ext.toUpperCase() || 'File';
   }
   function finalBlock(ev) {
     const c = el('div', 'final');
+    const page = (ev.files || []).find(isPage);
+    if (page) { state.playPath = page; state.playNonce++; if (state.panelTab === 'play') renderPanel(); }
     c.append(el('div', 'msg-ai md', renderMarkdown(ev.message)));
     if (ev.files && ev.files.length) {
       const box = el('div', 'files');
       for (const f of ev.files) {
+        if (isPage(f) || isModel(f)) {
+          const card = el('div', 'made-file');
+          const txt = el('span', 'grow'); txt.append(el('b', '', esc(f)), el('small', '', fileKind(f)));
+          const play = el('button', 'btn btn-primary', isModel(f) ? 'View' : 'Play'); play.type = 'button';
+          play.addEventListener('click', () => openPlay(f));
+          const dl = el('a', 'icon-btn'); dl.href = fileUrl(f, true); dl.title = 'Download'; dl.setAttribute('aria-label', `Download ${f}`); dl.append(ic('download'));
+          card.append(ic(isModel(f) ? 'cube' : 'game-controller'), txt, play, dl);
+          box.append(card);
+          continue;
+        }
         const a = el('a', 'made-file');
         a.href = fileUrl(f, true);
         const txt = el('span', ''); txt.append(el('b', '', esc(f)), el('small', '', fileKind(f) + ' · Download'));
@@ -500,10 +595,20 @@
   async function submit(text) {
     text = text.trim();
     if (!text || state.running) return;
+    if (state.attach.some((a) => !a.path)) return toast('Wait for the files to finish uploading');
+    if (state.attach.length) text += `\n\nAttached files (in the workspace): ${state.attach.map((a) => a.path).join(', ')}`;
     $('#input').value = '';
+    state.attach = [];
+    renderAttachments();
     autosize();
     try {
-      if (!state.current) {
+      if (!state.current && state.draft) {
+        const id = state.draft;
+        state.draft = null;
+        await api(`/tasks/${id}/message`, { method: 'POST', body: { text } });
+        await loadTasks();
+        openTask(id);
+      } else if (!state.current) {
         const t = await api('/tasks', { method: 'POST', body: { text } });
         await loadTasks();
         openTask(t.id);
@@ -512,6 +617,53 @@
       }
     } catch (e) { toast(e.message, { error: true }); }
   }
+  /* ---------- Attachments: models, images, sounds the agent can use ---------- */
+  async function attachFiles(list) {
+    const files = [...(list || [])];
+    if (!files.length) return;
+    try {
+      const id = state.current || state.draft || (state.draft = (await api('/tasks', { method: 'POST', body: {} })).id);
+      for (const file of files) {
+        const item = { name: file.name, path: null };
+        state.attach.push(item);
+        renderAttachments();
+        try {
+          const res = await fetch(`/api/tasks/${id}/upload?name=${encodeURIComponent(file.name)}`, { method: 'POST', body: file });
+          const j = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(j.error || res.statusText);
+          item.path = j.path;
+          if (isModel(j.path)) { state.playPath = j.path; state.playNonce++; }
+        } catch (e) {
+          state.attach = state.attach.filter((a) => a !== item);
+          toast(`Could not attach ${file.name}: ${e.message}`, { error: true });
+        }
+        renderAttachments();
+      }
+      if (state.panelTab === 'files' || state.panelTab === 'play') renderPanel();
+    } catch (e) { toast(e.message, { error: true }); }
+  }
+  function renderAttachments() {
+    const box = $('#attachments');
+    box.innerHTML = '';
+    box.hidden = !state.attach.length;
+    for (const a of state.attach) {
+      const chip = el('span', 'attach-chip' + (a.path ? '' : ' uploading'));
+      chip.append(ic(isModel(a.name) ? 'cube' : 'file'), el('span', 'nm', esc(a.name)));
+      if (!a.path) chip.append(el('small', '', 'Uploading'));
+      else {
+        if (isModel(a.path) && state.current) {
+          const v = el('button', 'icon-btn'); v.type = 'button'; v.title = 'View model'; v.setAttribute('aria-label', `View ${a.name}`); v.append(ic('cube'));
+          v.addEventListener('click', () => openPlay(a.path));
+          chip.append(v);
+        }
+        const x = el('button', 'icon-btn'); x.type = 'button'; x.title = 'Remove from this message'; x.setAttribute('aria-label', `Remove ${a.name}`); x.append(ic('x'));
+        x.addEventListener('click', () => { state.attach = state.attach.filter((b) => b !== a); renderAttachments(); });
+        chip.append(x);
+      }
+      box.append(chip);
+    }
+  }
+
   function updateSend() { $('#send').disabled = !$('#input').value.trim(); }
   function autosize() { updateSend(); const i = $('#input'); i.style.height = 'auto'; i.style.height = Math.min(240, i.scrollHeight) + 'px'; }
 
@@ -699,6 +851,7 @@
     }
     top.append(settingRow('Fallbacks', 'Used only when the active provider fails.', null, true), fb);
     body.append(top);
+    body.append(localModels());
 
     const list = section('Providers', 'Ollama runs models on this computer and nothing leaves it. The others send your task and Freehand\'s tool results to that company. Their free tiers have rate limits.');
     for (const id of ids) {
@@ -741,6 +894,139 @@
       list.append(d);
     }
     body.append(list);
+  }
+
+  /* Local AI models: Ollama downloads, your own .gguf files, and Freehand's own model. */
+  const gb = (n) => (n ? `${(n / 1024 ** 3).toFixed(1)} GB` : '');
+  function localModels() {
+    const sec = section('Local AI models', 'Models in Ollama run on this computer. Download one, bring your own .gguf file, or build Freehand\'s own model.');
+    const box = el('div', 'stack-sm');
+    sec.append(box);
+    const load = async () => {
+      box.innerHTML = '';
+      box.append(el('p', 'hint', 'Checking Ollama'));
+      const st = await api('/ollama').catch((e) => ({ running: false, error: e.message, models: [] }));
+      box.innerHTML = '';
+      if (!st.running) {
+        const retry = el('button', 'btn', 'Check again'); retry.type = 'button'; retry.addEventListener('click', load);
+        box.append(el('p', 'hint', esc(`Ollama is not running (${st.error || 'no answer'}). Install it from ollama.com and start it, then check again.`)), retry);
+        return;
+      }
+      const cur = state.settings.active === 'ollama' ? state.settings.providers.ollama.model : '';
+      const use = (name) => patchSettings({ active: 'ollama', providers: { ollama: { model: name } } }, `Using ${name}`).then(renderSettings);
+
+      // Freehand's own model
+      const own = el('div', 'own-model');
+      const head = el('div', 'own-head');
+      const t = el('span', 'grow'); t.append(el('b', '', esc(st.freehandName)), el('small', '', st.freehand ? 'Installed' : 'Not built yet'));
+      head.append(ic('lightning'), t);
+      own.append(head, el('p', 'hint', 'Freehand\'s own model. It is tuned to build games, make 3D models with make_model, use the models you attach, and play-test its work until it runs. It is built on a model you choose. Small models fit small graphics cards.'));
+      const base = el('select'); base.setAttribute('aria-label', 'Base model');
+      for (const b of st.recommended || []) { const o = el('option', '', esc(b + (st.bases.includes(b) ? '' : '  (downloads first)'))); o.value = b; base.append(o); }
+      if (st.bases[0]) base.value = st.bases[0];
+      const make = el('button', 'btn btn-primary', st.freehand ? 'Rebuild' : 'Build it'); make.type = 'button';
+      const prog = el('div', 'job'); prog.hidden = true;
+      make.addEventListener('click', async () => {
+        make.disabled = true;
+        const ok = await runJob('/ollama/freehand', { base: base.value }, prog);
+        make.disabled = false;
+        if (ok) { toast(`${st.freehandName} is ready`); await use(st.freehandName); }
+      });
+      const row = el('div', 'row-actions'); row.append(base, make);
+      if (st.freehand && cur.replace(/:latest$/, '') !== st.freehandName) { const u = el('button', 'btn', 'Use it'); u.type = 'button'; u.addEventListener('click', () => use(st.freehandName)); row.append(u); }
+      own.append(row, prog);
+      box.append(own);
+
+      // Installed models
+      const list = el('div', 'list model-list');
+      for (const m of st.models) {
+        const r = el('div', 'model-row');
+        const g = el('span', 'grow'); g.append(el('b', '', esc(m.name)), el('small', '', esc([m.params, m.family, gb(m.size)].filter(Boolean).join(' · '))));
+        r.append(ic('cpu'), g);
+        if (/embed|bert/i.test(`${m.name} ${m.family}`)) r.append(el('span', 'tag', 'Embeddings only'));
+        else if (cur === m.name || cur === m.name.replace(/:latest$/, '')) { const tag = el('span', 'tag'); tag.dataset.tone = 'ok'; tag.append(el('span', 'dot'), document.createTextNode('In use')); r.append(tag); }
+        else { const u = el('button', 'btn', 'Use'); u.type = 'button'; u.addEventListener('click', () => use(m.name)); r.append(u); }
+        list.append(r);
+      }
+      box.append(settingRow('On this computer', st.models.length ? `${st.models.length} models in Ollama ${st.version || ''}.` : 'No models yet.', null, true), list);
+
+      // Download
+      const name = textField('Model to download', '', 'qwen3:8b', () => {});
+      const dl = el('button', 'btn', 'Download'); dl.type = 'button';
+      const dlProg = el('div', 'job'); dlProg.hidden = true;
+      dl.addEventListener('click', async () => {
+        const v = name.value.trim();
+        if (!v) return name.focus();
+        dl.disabled = true;
+        const ok = await runJob('/ollama/pull', { model: v }, dlProg);
+        dl.disabled = false;
+        if (ok) { toast(`Downloaded ${v}`); load(); }
+      });
+      box.append(settingRow('Download a model', 'Any name from ollama.com/library, like qwen3:8b or qwen2.5-coder:7b.', [name, dl, dlProg]));
+
+      // Import a .gguf
+      const file = el('input'); file.type = 'file'; file.accept = '.gguf'; file.hidden = true;
+      const pickFile = el('button', 'btn', 'Choose a .gguf file'); pickFile.type = 'button';
+      pickFile.addEventListener('click', () => file.click());
+      const nm = textField('Name for the model', '', 'my-model', () => {});
+      file.addEventListener('change', () => {
+        if (!file.files[0]) return;
+        pickFile.textContent = file.files[0].name;
+        if (!nm.value) nm.value = file.files[0].name.replace(/\.gguf$/i, '').toLowerCase().replace(/[^a-z0-9._-]+/g, '-');
+      });
+      const imp = el('button', 'btn', 'Import'); imp.type = 'button';
+      const impProg = el('div', 'job'); impProg.hidden = true;
+      imp.addEventListener('click', async () => {
+        if (!file.files[0]) return file.click();
+        if (!nm.value.trim()) return nm.focus();
+        imp.disabled = true;
+        const ok = await runJob(`/ollama/import?name=${encodeURIComponent(nm.value.trim())}`, file.files[0], impProg);
+        imp.disabled = false;
+        if (ok) { toast(`Imported ${nm.value.trim()}`); load(); }
+      });
+      box.append(settingRow('Bring your own model', 'A .gguf file you downloaded or trained. Freehand copies it into Ollama.', [file, pickFile, nm, imp, impProg]));
+    };
+    load();
+    return sec;
+  }
+
+  /** Runs a long Ollama job and shows its progress. body is JSON, or a File to upload. Resolves true on success. */
+  async function runJob(path, body, box) {
+    box.hidden = false;
+    box.innerHTML = '';
+    const label = el('span', 'grow', 'Starting');
+    const bar = el('progress'); bar.max = 1; bar.removeAttribute('value');
+    box.append(bar, label);
+    try {
+      const isFile = body instanceof Blob;
+      const res = await fetch('/api' + path, { method: 'POST', headers: isFile ? {} : { 'content-type': 'application/json' }, body: isFile ? body : JSON.stringify(body) });
+      if (!res.ok || !res.body) { let m = res.statusText; try { m = (await res.json()).error || m; } catch { /* not JSON */ } throw new Error(m); }
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '', ok = false;
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let i;
+        while ((i = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, i); buf = buf.slice(i + 1);
+          if (!line.trim()) continue;
+          const j = JSON.parse(line);
+          if (j.error) throw new Error(j.error);
+          if (j.done) ok = true;
+          if (j.total && j.completed != null) { bar.value = j.completed / j.total; label.textContent = `${j.status || 'Working'}: ${gb(j.completed)} of ${gb(j.total)}`; }
+          else if (j.status) { bar.removeAttribute('value'); label.textContent = j.status === 'success' ? 'Done' : j.status; }
+        }
+      }
+      bar.value = 1;
+      label.textContent = 'Done';
+      return ok;
+    } catch (e) {
+      label.textContent = e.message;
+      box.classList.add('fail');
+      return false;
+    }
   }
 
   function settingsCapabilities(body) {
@@ -852,6 +1138,7 @@
 
   /* ---------- Wire up ---------- */
   const STARTERS = [
+    { icon: 'game-controller', label: 'Make a game', text: 'Make a small 3D browser game where [the player does something]. Make the models it needs, play-test it, and let me play it' },
     { icon: 'magnifying-glass', label: 'Research', text: 'Research [topic] across several reliable sources and write a short report with links as report.md' },
     { icon: 'code', label: 'Write code', text: 'Write a small Python script that [does something], run it to test it, and explain how to use it' },
     { icon: 'browser', label: 'Browse the web', text: 'Open [website] in the browser, tell me what the page says, and save a screenshot' },
@@ -907,6 +1194,12 @@
       if (ctrlMode ? e.ctrlKey || e.metaKey : !e.shiftKey) { e.preventDefault(); submit($('#input').value); }
     });
     $('#input').addEventListener('input', autosize);
+    $('#attach').addEventListener('click', () => $('#attach-input').click());
+    $('#attach-input').addEventListener('change', (e) => { attachFiles(e.target.files); e.target.value = ''; });
+    $('#input').addEventListener('paste', (e) => { if (e.clipboardData && e.clipboardData.files.length) { e.preventDefault(); attachFiles(e.clipboardData.files); } });
+    $('#main').addEventListener('dragover', (e) => { if (e.dataTransfer && [...e.dataTransfer.types].includes('Files')) { e.preventDefault(); $('#main').classList.add('drop'); } });
+    $('#main').addEventListener('dragleave', (e) => { if (!$('#main').contains(e.relatedTarget)) $('#main').classList.remove('drop'); });
+    $('#main').addEventListener('drop', (e) => { $('#main').classList.remove('drop'); if (e.dataTransfer && e.dataTransfer.files.length && state.view !== 'settings') { e.preventDefault(); attachFiles(e.dataTransfer.files); } });
     $('#stop').addEventListener('click', () => state.current && api(`/tasks/${state.current}/stop`, { method: 'POST' }));
     $('#thread').addEventListener('scroll', () => { $('#jump').hidden = nearBottom(); });
     $('#jump').addEventListener('click', () => { thread().scrollTop = thread().scrollHeight; });
