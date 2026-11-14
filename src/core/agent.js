@@ -5,6 +5,8 @@ const { chat } = require('./providers');
 const { buildTools, listDir } = require('../tools');
 const { BrowserSession } = require('../tools/browser');
 const { stripThinking, extractJson, truncate, safePath } = require('./util');
+const { templateFor, gameTitle } = require('./genres');
+const { TEMPLATES } = require('../tools/gamekit');
 
 const TOOL_RESULT_FOR_MODEL = 6000;
 const TOOL_RESULT_FOR_UI = 3500;
@@ -28,7 +30,8 @@ Given the user's request, reply with ONLY a JSON object, no other text:
 - If the request needs real work: {"title": "<3-6 word title>", "steps": ["<imperative step>", ...]} with ${effort.steps} concrete steps.
 - If it is a simple question or chat that needs no tools: {"title": "<3-6 word title>", "answer": "<your complete answer in Markdown>"}.
 Prefer the fewest steps that get a verified result. Do not include a "write the final answer" step; finishing is automatic.
-Games: start with "Start from the <flyer|platformer|topdown|blank|3d> game_template", then steps that change game.js to fit the request (rules, looks, sprites with make_sprite, 3D models with make_model), then end with "Play-test with play_test and fix everything it reports". Do not plan web searches for how to code a game; the templates are better.
+Games: start with "Start from the <${Object.keys(TEMPLATES).join('|')}> game_template", then steps that change game.js to fit the request (rules, looks, sprites with make_sprite, 3D models with make_model), then end with "Play-test with play_test and fix everything it reports". Do not plan web searches for how to code a game; the templates are better.
+If the request says a game template is already installed, do not plan to start one: plan only the changes the request asks for (look, sprites, rules, numbers in TUNING), then the play-test. A request that only names a game ("make snake") needs no rule changes: plan a sprite or look change and the play-test.
 ${effort.work}`;
 }
 
@@ -49,9 +52,10 @@ function systemPrompt({ plan, mode, tools, effort, files }) {
     `- ${effort.work}`,
     '',
     'Games, 3D and web pages:',
-    '- New game? Call game_template first (flyer, platformer, topdown, blank, 3d). It writes a working game; then edit game.js with file_edit to fit the request. Do not write a game loop from scratch and do not copy games from the web.',
+    `- New game? Call game_template first (${Object.keys(TEMPLATES).join(', ')}). It writes a working game; then edit game.js with file_edit to fit the request. Do not write a game loop from scratch and do not copy games from the web.`,
+    '- Need a feature the template lacks (lives, power-ups, coins, sprite animation, levels, a timer, enemies that chase)? game_recipe gives tested code for kit.js games; paste it in with file_edit.',
     '- Build them as files in the workspace: index.html plus .js/.css files and an assets/ folder. Use relative paths ("./assets/tree.glb") so they run anywhere.',
-    '- 2D art: draw sprites with make_sprite (pixel art saved as PNG) and load them with Kit.image. Sound effects: Kit.sfx("jump" | "coin" | "hit" | "boom" | "power").',
+    '- 2D art: draw sprites with make_sprite (pixel art saved as PNG) and load them with Kit.image. The flyer, runner and shooter templates already draw the player from assets/player.png, so make_sprite to that path changes its look with no code change. Sound effects: Kit.sfx("jump" | "coin" | "hit" | "boom" | "power").',
     '- Bugs small models often write: an obstacle pair checked with || so the player dies at once; score added every frame instead of once per obstacle; a second game loop started on restart; listeners added inside functions that run again; drawing an object at a different place than its hitbox; a start button the inputs never reach. Check for these when a game misbehaves.',
     '- For 3D use three.js from a CDN with an import map: {"imports": {"three": "https://unpkg.com/three@0.180.0/build/three.module.js", "three/addons/": "https://unpkg.com/three@0.180.0/examples/jsm/"}}. Load models with GLTFLoader (and OBJLoader/FBXLoader for those formats). For 2D, a plain <canvas> is enough.',
     '- Need a model nobody gave you? Make it with make_model (low-poly shapes, saved as .glb). Models the user attached are in assets/; run model_info on them first to learn their size and animation names.',
@@ -129,6 +133,8 @@ class Agent {
     this.stepWrites = 0; // files changed during the current plan step
     this.claimNudges = 0;
     this.failStreak = 0;
+    this.lastError = '';
+    this.sameError = 0;
   }
 
   browser() {
@@ -212,6 +218,48 @@ class Agent {
     return { title: truncate(userText, 40, false), steps: ['Work on the request using the available tools'] };
   }
 
+  /**
+   * A request for a new game in a known genre starts from that genre's template right away,
+   * recorded as Freehand's own game_template call so the model sees the working code.
+   * Returns a note for the planner, or null.
+   */
+  async autoTemplate(userText) {
+    const kind = templateFor(userText);
+    if (!kind || this.history.some((h) => h.call && h.call.name === 'game_template')) return null;
+    try {
+      if (fs.readdirSync(this.workspace).some((f) => /\.html?$/i.test(f))) return null; // there is already a game or page to work on
+    } catch { return null; }
+    const call = { id: `call_${++this.callCounter}`, name: 'game_template', args: { template: kind, title: gameTitle(userText) } };
+    const tool = this.toolByName.game_template;
+    this.emit('tool', { id: call.id, name: call.name, label: tool.label(call.args), icon: tool.icon, args: call.args });
+    let output;
+    try {
+      output = await tool.run(call.args, this.context());
+    } catch (e) {
+      this.emit('tool_result', { id: call.id, ok: false, preview: `ERROR: ${e.message}` });
+      return null;
+    }
+    this.emit('tool_result', { id: call.id, ok: true, preview: truncate(output, TOOL_RESULT_FOR_UI) });
+    this.history.push({ role: 'assistant', content: `This is a ${kind} game, so I start from the tested ${kind} template.`, call });
+    this.history.push({ role: 'tool', id: call.id, name: call.name, content: truncate(output, TOOL_RESULT_FOR_MODEL) });
+    this.game.changed = true;
+    return `The ${kind} game template is already installed and works. Plan only the changes this request needs, then play-test.`;
+  }
+
+  /**
+   * Small models "fix" a working kit game by rewriting it from scratch, which breaks it.
+   * Returns an error for a file_write that would throw the kit away, or null.
+   */
+  guardWrite(call) {
+    if (call.name !== 'file_write' || !fs.existsSync(path.join(this.workspace, 'kit.js'))) return null;
+    const file = String((call.args && call.args.path) || '').replace(/^\.\//, '');
+    const text = String((call.args && call.args.content) || '');
+    if (file === 'kit.js') return 'kit.js is the tested engine; do not rewrite it. Change game.js instead, with small file_edit calls.';
+    if (/^index\.html?$/i.test(file) && !/kit\.js/.test(text)) return 'This index.html no longer loads kit.js and game.js, so it would throw away the working game. Keep index.html as it is and change game.js with file_edit.';
+    if (file === 'game.js' && !/Kit\.start\s*\(/.test(text)) return 'This game.js does not call Kit.start, so the game would not run. Change the existing game.js with small file_edit calls instead of rewriting it (file_read it first if you need the exact text).';
+    return null;
+  }
+
   async decide() {
     const mode = this.toolMode();
     const names = this.tools.map((t) => t.name);
@@ -268,7 +316,8 @@ class Agent {
     this.history.push({ role: 'user', content: userText, ...(turn === undefined ? {} : { turn }) });
     this.emit('status', { status: 'running' });
     try {
-      const planned = await this.planTask(userText);
+      const started = await this.autoTemplate(userText);
+      const planned = await this.planTask(started ? `${userText}\n\n(${started})` : userText);
       if (planned.title) this.emit('title', { title: String(planned.title).slice(0, 80) });
       if (typeof planned.answer === 'string' && !Array.isArray(planned.steps)) {
         this.history.push({ role: 'assistant', content: planned.answer });
@@ -363,6 +412,8 @@ class Agent {
       let ok = true;
       try {
         if (this.loopGuard(call)) throw new Error('You have made this exact call several times already. Try a different approach or finish with what you have.');
+        const blocked = this.guardWrite(call);
+        if (blocked) throw new Error(blocked);
         if (tool.approval && this.settings.approval !== 'auto') {
           const req = tool.approval(call.args || {});
           const allowed = await this.approve({ ...req, tool: call.name });
@@ -375,6 +426,7 @@ class Agent {
         output = `ERROR: ${e.message}`;
       }
       this.emit('tool_result', { id: call.id, ok, preview: truncate(output, TOOL_RESULT_FOR_UI) });
+      if (ok && call.name === 'play_test') output += this.repeatedError(output);
       this.trackGame(call, ok, output);
       if (ok && WRITES.includes(call.name)) this.stepWrites++;
       if (ok && ['file_write', 'file_edit'].includes(call.name)) this.lastCalls = []; // the files changed, so repeating a test or run is new work
@@ -388,6 +440,22 @@ class Agent {
     this.emit('final', { message: msg, files: [] });
     this.emit('status', { status: 'stopped' });
     return { status: 'stopped', message: msg };
+  }
+
+  /**
+   * Small models keep patching the wrong spot while play_test reports the same error.
+   * After the same first error survives two fixes, tell the model to look before editing again.
+   */
+  repeatedError(output) {
+    const m = output.match(/^ERRORS \(\d+\), fix these:\n(.+)/m);
+    const first = m ? m[1].trim() : '';
+    this.sameError = first && first === this.lastError ? this.sameError + 1 : 0;
+    this.lastError = first;
+    if (this.sameError < 2) return '';
+    const at = output.match(/\.\/([\w./-]+\.m?js):(\d+)/);
+    return `\n\nSTUCK: this same error has come back after your last ${this.sameError} fixes, so they did not touch the real cause. ` +
+      (at ? `file_read ${at[1]} and look closely at line ${at[2]} and the lines that declare what it uses (a line starting with // does not run). ` : 'file_read the file the error names and look at the line it gives. ') +
+      'Then make one different fix. If it still fails, call game_template with overwrite true to get a working game back.';
   }
 
   /** Notes game edits and play-test results, so the agent cannot finish with an untested or broken game. */

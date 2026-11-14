@@ -12,6 +12,7 @@
  *   Kit.sfx('jump')      jump coin hit boom power click
  *   Kit.image('assets/hero.png')  load once; Kit.drawImage(ctx, img, x, y, w, h, fallbackColor)
  *   Kit.addScore(n), Kit.burst(x, y, color), Kit.shake(px), Kit.rand(a, b)
+ *   g.pointer            last mouse or touch position {x, y} in game pixels (null until the pointer moves)
  *
  * The state is mirrored to window.__game so play_test can report the score and screen.
  */
@@ -34,7 +35,7 @@
   let audio = null;
   const STEP = 1 / 60;
 
-  const g = { state: 'title', score: 0, best: 0, time: 0, width: 400, height: 600 };
+  const g = { state: 'title', score: 0, best: 0, time: 0, width: 400, height: 600, pointer: null };
 
   function loadBest() {
     try { return Number(localStorage.getItem('kit-best:' + document.title)) || 0; } catch (e) { return 0; }
@@ -73,6 +74,10 @@
       unlockAudio();
       if (onStartInput()) return;
       press('jump');
+      const r = canvas.getBoundingClientRect();
+      g.pointer = { x: (e.clientX - r.left) * (g.width / r.width), y: (e.clientY - r.top) * (g.height / r.height) };
+    });
+    canvas.addEventListener('pointermove', function (e) {
       const r = canvas.getBoundingClientRect();
       g.pointer = { x: (e.clientX - r.left) * (g.width / r.width), y: (e.clientY - r.top) * (g.height / r.height) };
     });
@@ -216,7 +221,7 @@
       return img;
     },
     drawImage: function (c, img, x, y, w, h, fallback) {
-      if (img && img.complete && img.naturalWidth && !img.failed) c.drawImage(img, x, y, w, h);
+      if (img && img.complete && img.naturalWidth && !img.failed) { c.imageSmoothingEnabled = false; c.drawImage(img, x, y, w, h); }
       else { c.fillStyle = fallback || '#f0c'; c.fillRect(x, y, w, h); }
     },
     sfx: function (name) {

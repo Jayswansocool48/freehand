@@ -291,6 +291,7 @@ const HINTS = [
 HINTS.push(
   [/Invalid or unexpected token|Unexpected token|missing \) after|Unexpected end of input/, 'HOW TO FIX: a .js file has a syntax error, so none of it ran. Often a literal \\n was written into the code, or a quote or bracket is unclosed. file_read the file, find the broken line and fix it (file_write the whole file if that is easier).'],
   [/Identifier '(\w+)' has already been declared/, 'HOW TO FIX: the same const/let name is declared twice in one file. Delete one of the declarations.'],
+  [/ReferenceError: (?!THREE\b)\w+ is not defined/, 'HOW TO FIX: a name is used but never declared. file_read the file at the line in the error and look for the line that should declare it: it may be missing, misspelled, or commented out with // (a commented-out line does not run).'],
   [/\bg\.(pressed|down|overlap|addScore|gameOver|sfx|image|drawImage|burst|shake|rand|clamp) is not a function/, 'HOW TO FIX: the helpers belong to Kit, not g. Write Kit.pressed(...), Kit.down(...), Kit.overlap(...), Kit.addScore(...), Kit.gameOver(), Kit.sfx(...).'],
 );
 function hintsFor(text) { return HINTS.filter(([re]) => re.test(text)).map(([, hint]) => hint); }

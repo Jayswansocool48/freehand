@@ -296,3 +296,109 @@ test('make_sprite saves a PNG, makes sprite sheets and reports colours missing f
   assert.match(sheet, /24×4 px\)\. Sprite sheet: 3 frames, each 8 px wide/);
   await assert.rejects(tool('make_sprite').run({ path: 'x.png', pixels: ['A'], palette: { A: 'blurple' } }, ctx), /not a hex color/);
 });
+
+test('genres: a request for a new game picks a template and a title', () => {
+  const { templateFor, gameTitle } = require('../src/core/genres');
+  const cases = {
+    'make flappy bird': 'flyer',
+    'make a snake game': 'snake',
+    'build a breakout game with colourful bricks': 'breakout',
+    'make a space shooter': 'shooter',
+    'make me an endless runner game': 'runner',
+    'make a platformer where a fox collects gems': 'platformer',
+    'make a 3d racing game': '3d',
+    'make a game where you dodge falling rocks': 'topdown',
+    'what is the capital of france': null,
+    'fix the game so the bird flies higher': null,
+    'write a python script that renames photos': null,
+  };
+  for (const [ask, kind] of Object.entries(cases)) assert.equal(templateFor(ask), kind, ask);
+  assert.equal(gameTitle('make flappy bird'), 'Flappy Bird');
+  assert.equal(gameTitle('build an endless runner game'), 'Endless Runner');
+  assert.equal(gameTitle('make a platformer where a fox collects gems'), 'Platformer');
+});
+
+test('agent starts a known kind of game from its template before the model acts', async () => {
+  let firstAgentCall = null;
+  const mock = await mockProvider((body) => {
+    if (!body.tools) return { message: text('{"title":"Flappy","steps":["Play-test it"]}') };
+    if (!firstAgentCall) firstAgentCall = body.messages;
+    const n = body.messages.filter((m) => m.role === 'tool').length;
+    if (n === 1) return { message: toolCall('play_test', { path: 'index.html' }) };
+    return { message: toolCall('finish', { message: 'Done' }) };
+  });
+  const s = settingsFor(mock.url, { effort: 'low' });
+  const workspace = fs.mkdtempSync(path.join(home, 'ws-'));
+  const events = [];
+  const agent = new Agent({ settings: s, workspace, signal: new AbortController().signal, history: [], emit: (t, d) => events.push({ type: t, ...d }), ask: async () => '', approve: async () => true });
+  agent.toolByName.play_test.run = async () => 'Errors: none';
+  await agent.run('make flappy bird');
+  mock.close();
+  assert.match(fs.readFileSync(path.join(workspace, 'index.html'), 'utf8'), /<title>Flappy Bird<\/title>/);
+  assert.ok(fs.existsSync(path.join(workspace, 'kit.js')));
+  assert.equal(events.find((e) => e.type === 'tool').name, 'game_template', 'the UI shows the template step first');
+  const call = firstAgentCall.find((m) => m.role === 'assistant' && m.tool_calls);
+  assert.equal(call.tool_calls[0].function.name, 'game_template', 'the model sees the template as its own earlier call');
+  assert.ok(firstAgentCall.some((m) => m.role === 'tool' && /TUNING/.test(m.content)), 'and it sees the game code');
+});
+
+test('agent refuses a file_write that would throw away a working kit game', async () => {
+  const workspace = fs.mkdtempSync(path.join(home, 'ws-'));
+  require('../src/tools/gamekit').installTemplate(workspace, 'flyer');
+  const agent = new Agent({ settings: settingsFor('http://127.0.0.1:1'), workspace, signal: new AbortController().signal, history: [], emit: () => {}, ask: async () => '', approve: async () => true });
+  const w = (p, content) => agent.guardWrite({ name: 'file_write', args: { path: p, content } });
+  assert.match(w('index.html', '<html><script>let bird;</script></html>'), /throw away the working game/);
+  assert.match(w('kit.js', '//'), /tested engine/);
+  assert.match(w('game.js', 'function loop() {}'), /does not call Kit\.start/);
+  assert.equal(w('game.js', 'Kit.start({ init, update, draw });'), null);
+  assert.equal(w('notes.md', 'hi'), null);
+  assert.equal(agent.guardWrite({ name: 'file_edit', args: { path: 'kit.js' } }), null);
+});
+
+test('every game recipe runs inside a kit game without errors', () => {
+  const vm = require('vm');
+  const { RECIPES, recipeText } = require('../src/tools/gamekit/recipes');
+  const blank = fs.readFileSync(path.join(__dirname, '../src/tools/gamekit/templates/blank/game.js'), 'utf8');
+  const anyCtx = new Proxy({}, { get: (o, k) => (k in o ? o[k] : () => ({ addColorStop() {} })), set: (o, k, v) => { o[k] = v; return true; } });
+  for (const [name, r] of Object.entries(RECIPES)) {
+    assert.match(recipeText(name), /top of game\.js/);
+    const code = blank
+      .replace('let player;', `let player;\n${r.top}`)
+      .replace(/(function init\(\) \{\n[^\n]*\n)/, `$1${r.init}\n`)
+      .replace(/(if \(Kit\.pressed\('jump'\)\)[^\n]*\n)/, `$1${r.update}\n`)
+      .replace(/(ctx\.fillRect\(player\.x, player\.y, player\.w, player\.h\);\n)/, `$1${r.draw}\n`)
+      .replace(/Kit\.start\(\{([^}]*)\}\);/, 'globalThis.game = {$1};');
+    for (const part of [r.top, r.init, r.update, r.draw]) assert.ok(code.includes(part), `${name}: every part was pasted in`);
+    assert.match(code, /globalThis\.game/);
+    const kit = { down: () => false, pressed: () => false, overlap: () => true, clamp: (v, a, b) => Math.max(a, Math.min(b, v)), rand: (a, b) => a + Math.random() * (b - a), addScore: () => { g.score++; }, gameOver: () => { g.over = true; }, sfx() {}, shake() {}, burst() {}, image: () => ({ complete: false }), drawImage() {} };
+    const g = { score: 0, time: 0, state: 'play', pointer: null };
+    const sandbox = { Kit: kit, Math, document: { title: 't' } };
+    vm.createContext(sandbox);
+    vm.runInContext(code, sandbox, { filename: `${name}.js` });
+    const game = sandbox.game;
+    game.init(g);
+    for (let i = 0; i < 600; i++) { g.time += 1 / 60; game.update(g, 1 / 60); if (i % 10 === 0) game.draw(g, anyCtx); }
+  }
+  assert.throws(() => recipeText('jetpack'), /Unknown recipe "jetpack"/);
+});
+
+test('templates ship a player sprite, and file_edit warns about edits inside comments', async () => {
+  const ws = fs.mkdtempSync(path.join(home, 'ws-'));
+  const { ctx } = ctxFor(ws);
+  const out = await tool('game_template').run({ template: 'flyer' }, ctx);
+  assert.match(out, /assets\/player\.png/);
+  assert.equal(fs.readFileSync(path.join(ws, 'assets/player.png')).toString('hex', 1, 4), '504e47');
+  assert.match(fs.readFileSync(path.join(ws, 'game.js'), 'utf8'), /^const playerImg = Kit\.image\('assets\/player\.png'\);/m);
+  fs.writeFileSync(path.join(ws, 'extra.js'), "let a = 1;\n// const img = Kit.image('a.png');\n");
+  assert.match(await tool('file_edit').run({ path: 'extra.js', find: "Kit.image('a.png')", replace: "Kit.image('b.png')" }, ctx), /inside a \/\/ comment/);
+  assert.equal(await tool('file_edit').run({ path: 'extra.js', find: 'let a = 1;', replace: 'let a = 2;' }, ctx), 'Edited extra.js');
+});
+
+test('agent says it is stuck when play_test keeps reporting the same error', () => {
+  const agent = new Agent({ settings: settingsFor('http://127.0.0.1:1'), workspace: home, signal: new AbortController().signal, history: [], emit: () => {}, ask: async () => '', approve: async () => true });
+  const report = 'Played ./index.html\nERRORS (1), fix these:\n[uncaught] ReferenceError: playerImg is not defined\n    at ./game.js:20:1\nFailed loads: none';
+  assert.equal(agent.repeatedError(report), '');
+  assert.equal(agent.repeatedError(report), '');
+  assert.match(agent.repeatedError(report), /STUCK[\s\S]*file_read game\.js[\s\S]*line 20/);
+  assert.equal(agent.repeatedError('Played ./index.html\nErrors: none'), '');
+});

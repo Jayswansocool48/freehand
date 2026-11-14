@@ -6,7 +6,21 @@ const { webSearch, fetchPage } = require('./web');
 const { runCommand, runPython } = require('./exec');
 const { buildGlb, modelInfo, SHAPES } = require('./model3d');
 const { previewUrl } = require('../server/preview');
-const { TEMPLATES, installTemplate, makeSprite } = require('./gamekit');
+const { TEMPLATES, RECIPES, installTemplate, makeSprite } = require('./gamekit');
+const { recipeText } = require('./gamekit/recipes');
+
+/**
+ * Small models edit text inside a "// ..." comment and then wonder why nothing changed.
+ * Returns a warning when every changed line of a .js file is commented out.
+ */
+function commentedOut(text, start, length, file) {
+  if (!/\.(m?js|ts)$/i.test(file) || !length) return '';
+  const from = text.lastIndexOf('\n', start) + 1;
+  const to = text.indexOf('\n', start + length);
+  const lines = text.slice(from, to === -1 ? undefined : to).split('\n').filter((l) => l.trim());
+  if (!lines.length || !lines.every((l) => /^\s*\/\//.test(l))) return '';
+  return '\nWARNING: the text you changed is inside a // comment, so it does not run. Remove the // at the start of the line if you want the code to run.';
+}
 
 const obj = (properties, required = []) => ({ type: 'object', properties, required });
 const str = (description) => ({ type: 'string', description });
@@ -161,9 +175,10 @@ function buildTools() {
         if (!fs.existsSync(p)) throw new Error(`No such file: ${a.path}`);
         const txt = fs.readFileSync(p, 'utf8');
         const m = locateEdit(txt, String(a.find), String(a.replace == null ? '' : a.replace));
-        fs.writeFileSync(p, txt.slice(0, m.start) + m.replace + txt.slice(m.end), 'utf8');
+        const out = txt.slice(0, m.start) + m.replace + txt.slice(m.end);
+        fs.writeFileSync(p, out, 'utf8');
         ctx.emit('file', { path: path.relative(ctx.workspace, p).replace(/\\/g, '/') });
-        return `Edited ${a.path}`;
+        return `Edited ${a.path}${commentedOut(out, m.start, m.replace.length, p)}`;
       },
     },
     {
@@ -228,6 +243,18 @@ function buildTools() {
         return `Wrote ${files.join(', ')}. This is a working game; play_test it, then change ${main} to fit the request. ` +
           (kind === '3d' ? '' : 'Do not edit kit.js: it runs the loop, input, title and game-over screens. In game.js, init() resets a round, update(g, dt) moves things (dt in seconds), draw(g, ctx) draws. Kit.gameOver() ends a round; Kit.addScore(n) scores. ') +
           `\n\n${main}:\n${truncate(text, 7000)}`;
+      },
+    },
+    {
+      name: 'game_recipe',
+      icon: 'book-open',
+      description:
+        'Tested code to add a feature to a kit.js game, in four parts (top of game.js, init, update, draw) to paste in with file_edit. ' +
+        `Recipes: ${Object.entries(RECIPES).map(([k, r]) => `"${k}" (${r.about})`).join('; ')}.`,
+      parameters: obj({ recipe: { type: 'string', enum: Object.keys(RECIPES) } }, ['recipe']),
+      label: (a) => `Looking up the ${a.recipe} recipe`,
+      async run(a) {
+        return recipeText(String(a.recipe || ''));
       },
     },
     {

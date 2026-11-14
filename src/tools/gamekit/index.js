@@ -23,11 +23,64 @@ const PLAYER_CAR = [
   { name: 'wheel_br', shape: 'cylinder', size: [0.3, 0.16, 0.3], position: [-0.52, 0.15, -0.5], rotation: [0, 0, 90], color: '#222222' },
 ];
 
+// Default player art for templates whose game.js draws assets/player.png. make_sprite on the same
+// path replaces it with no code change.
+const PLAYER_SPRITES = {
+  flyer: { scale: 2, palette: { K: '#3b2a1a', Y: '#ffd23f', L: '#fff3b0', W: '#ffffff', B: '#222222', O: '#f5793a', D: '#e0a800' }, pixels: [
+      "......KKKKKK....",
+      "....KKYYYYKWWK..",
+      "...KYYYYYKWWWWK.",
+      "..KYYYYYYKWWWBK.",
+      ".KKKKKYYYKWWWBK.",
+      "KLLLLLKYYYKWWWK.",
+      "KLLLLLKYYYYKKKKK",
+      "KDLLLDKYYYKOOOOOK",
+      ".KDDDKYYYKOKKKKK.",
+      "..KKKYYYYYKOOOOK.",
+      "....KKKKKKKKKKK..",
+    ] },
+  runner: { scale: 3, palette: { K: '#1b3b36', G: '#26a69a', D: '#00796b', W: '#ffffff', B: '#000000', S: '#ffcc80', R: '#e53935' }, pixels: [
+      "...KKKKKK...",
+      "..KRRRRRRK..",
+      ".KRRRRRRRRK.",
+      ".KSSSSWWBSK.",
+      ".KSSSSWWBSK.",
+      ".KSSSSSSSSK.",
+      "..KKSSSSKK..",
+      ".KGGGGGGGGK.",
+      "KGGGGGGGGGGK",
+      "KSKGGGGGGKSK",
+      "KSKGGGGGGKSK",
+      ".K.KDDDDK.K.",
+      "...KDKKDK...",
+      "...KDK.KDK..",
+      "..KKDK.KDKK.",
+      "..KKK...KKK.",
+    ] },
+  shooter: { scale: 3, palette: { K: '#0d2b45', C: '#4fc3f7', L: '#b3e5fc', R: '#ef5350', W: '#ffffff', O: '#ff9800' }, pixels: [
+      ".....K.....",
+      "....KCK....",
+      "....KLK....",
+      "...KCLCK...",
+      "...KCWCK...",
+      "..KCCCCCK..",
+      ".KRKCCCKRK.",
+      "KRRKCCCKRRK",
+      "KRRCCCCCRRK",
+      "KKKKOKOKKKK",
+      "....O.O....",
+    ] },
+};
+
 const TEMPLATES = {
   flyer: { about: 'tap/Space to flap through gaps between obstacles (gravity, scrolling pipes or walls, score per gap passed)', files: ['index.html', 'kit.js', 'game.js'] },
   platformer: { about: 'side-scrolling run and jump: tile level, coins, stompable enemies, a goal flag', files: ['index.html', 'kit.js', 'game.js'] },
   topdown: { about: 'move in 8 directions, collect items, dodge enemies that chase you, waves get harder', files: ['index.html', 'kit.js', 'game.js'] },
-  blank: { about: 'empty kit.js game (a box that moves) for anything else 2D: shooters, puzzles, breakout, snake', files: ['index.html', 'kit.js', 'game.js'] },
+  snake: { about: 'grid snake: arrow keys steer, eat food to grow, walls and your own tail end the round', files: ['index.html', 'kit.js', 'game.js'] },
+  breakout: { about: 'paddle and ball (arrow keys or mouse) breaking rows of bricks, 3 lives, win by clearing them', files: ['index.html', 'kit.js', 'game.js'] },
+  shooter: { about: 'vertical space shooter: move left and right, hold Space to fire at enemies falling from the top, 3 lives', files: ['index.html', 'kit.js', 'game.js'] },
+  runner: { about: 'endless runner: the hero runs by itself, Space jumps (double jump) over obstacles, speeds up over time', files: ['index.html', 'kit.js', 'game.js'] },
+  blank: { about: 'empty kit.js game (a box that moves) for any other 2D game: puzzles, card games, rhythm, racing', files: ['index.html', 'kit.js', 'game.js'] },
   '3d': { about: 'three.js scene with a drivable player, collectibles, follow camera, and GLTF model loading with a fallback', files: ['index.html', 'main.js'], dir: 'three-3d' },
 };
 
@@ -51,6 +104,11 @@ function installTemplate(workspace, kind, { title = 'My Game', overwrite = false
     if (f === 'index.html') text = text.split('{{TITLE}}').join(safeTitle);
     fs.writeFileSync(path.join(workspace, f), text, 'utf8');
     written.push(f);
+  }
+  if (PLAYER_SPRITES[kind] && !fs.existsSync(path.join(workspace, 'assets', 'player.png'))) {
+    fs.mkdirSync(path.join(workspace, 'assets'), { recursive: true });
+    fs.writeFileSync(path.join(workspace, 'assets', 'player.png'), makeSprite(PLAYER_SPRITES[kind]).png);
+    written.push('assets/player.png');
   }
   if (kind === '3d' && !fs.existsSync(path.join(workspace, 'assets', 'player.glb'))) {
     fs.mkdirSync(path.join(workspace, 'assets'), { recursive: true });
@@ -151,4 +209,6 @@ function makeSprite({ pixels, palette = {}, scale = 1, frames }) {
   return { png: encodePng(width, height, rgba), width, height, frameWidth: fw * s, frames: sheets.length, missing: [...missing] };
 }
 
-module.exports = { TEMPLATES, installTemplate, makeSprite, encodePng };
+const { RECIPES } = require('./recipes');
+
+module.exports = { TEMPLATES, RECIPES, installTemplate, makeSprite, encodePng };
