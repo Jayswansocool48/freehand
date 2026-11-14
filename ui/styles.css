@@ -223,6 +223,18 @@ input[type="range"] { accent-color: var(--primary); }
 .thread-inner { max-width: 760px; margin: 0 auto; padding: 12px 24px 24px; display: flex; flex-direction: column; gap: 22px; font-family: var(--chat-font); }
 .item { animation: rise var(--spring-t) var(--spring) both; }
 .msg-user { align-self: flex-end; max-width: 85%; padding: 10px 14px; border-radius: var(--r-lg); background: var(--bubble); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 15px; }
+.user-turn { align-self: flex-end; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; max-width: 85%; min-width: 0; }
+.user-turn .msg-user { max-width: 100%; }
+.user-turn:has(.msg-edit) { width: min(600px, 85%); }
+.msg-actions { display: flex; gap: 2px; margin-top: -4px; opacity: 0; transition: opacity 120ms; }
+.user-turn:hover .msg-actions, .user-turn:focus-within .msg-actions, .final .msg-actions, .error-turn .msg-actions { opacity: 1; }
+.msg-actions .icon-btn { width: 28px; height: 28px; font-size: 15px; }
+body.busy .msg-actions .needs-idle { display: none; }
+.msg-edit { display: flex; flex-direction: column; gap: 8px; width: min(600px, 100%); }
+.msg-edit textarea { width: 100%; resize: vertical; padding: 10px 14px; border-radius: var(--r-lg); border: 1px solid var(--border); background: var(--bubble); color: inherit; font: inherit; font-size: 15px; line-height: 1.5; }
+.msg-edit-bar { display: flex; gap: 8px; justify-content: flex-end; }
+.error-turn { display: flex; flex-direction: column; gap: 6px; }
+@media (hover: none) { .msg-actions { opacity: 1; } }
 .msg-ai { min-width: 0; font-size: 15px; line-height: 1.65; overflow-wrap: anywhere; }
 .thought { color: var(--muted-foreground); font-size: 14px; }
 .md > :first-child { margin-top: 0; } .md > :last-child { margin-bottom: 0; }
@@ -267,6 +279,8 @@ input[type="range"] { accent-color: var(--primary); }
 .made-file > .ic { font-size: 20px; color: var(--muted-foreground); }
 .made-file b { font-weight: 500; display: block; overflow-wrap: anywhere; }
 .made-file small { color: var(--muted-foreground); }
+.final-foot { display: flex; align-items: center; gap: 12px; }
+.final-foot .msg-actions { margin-top: 0; }
 .done-row { display: inline-flex; gap: 6px; align-items: center; color: var(--muted-foreground); font: 13px var(--sans); }
 .done-row > .ic { color: var(--ok); }
 .working { display: inline-flex; gap: 8px; align-items: center; color: var(--muted-foreground); font: 13px var(--sans); }

@@ -252,9 +252,10 @@ class Agent {
     }
   }
 
-  async run(userText) {
+  /** `turn` tags the history entry so the chat can be rewound to this message later. */
+  async run(userText, turn) {
     this.sanitizeHistory();
-    this.history.push({ role: 'user', content: userText });
+    this.history.push({ role: 'user', content: userText, ...(turn === undefined ? {} : { turn }) });
     this.emit('status', { status: 'running' });
     try {
       const planned = await this.planTask(userText);

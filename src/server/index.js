@@ -166,6 +166,12 @@ function startServer({ port = 0, host = '127.0.0.1', token = crypto.randomBytes(
         try { task.start(String(body.text)); } catch (e) { return send(res, 409, { error: e.message }); }
         return send(res, 200, { ok: true });
       }
+      if (sub === 'rewind' && method === 'POST') {
+        const body = await readBody(req);
+        if (!String(body.text || '').trim()) return send(res, 400, { error: 'Empty message' });
+        try { task.rewind(Number(body.seq), String(body.text)); } catch (e) { return send(res, 409, { error: e.message }); }
+        return send(res, 200, { ok: true });
+      }
       if (sub === 'respond' && method === 'POST') {
         const body = await readBody(req);
         return send(res, task.respond(String(body.id), body.value) ? 200 : 404, { ok: true });

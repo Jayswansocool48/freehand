@@ -77,6 +77,34 @@ class Task {
     return true;
   }
 
+  /**
+   * Cuts the chat back to just before the user message at `seq` and sends `text` in its place
+   * (edit), or the same text again (retry). Files the agent already wrote stay in the workspace.
+   */
+  rewind(seq, text) {
+    if (this.status === 'running') throw new Error('Task is already running');
+    const ev = this.events[seq];
+    if (!ev || ev.type !== 'user') throw new Error('That message cannot be edited');
+    let cut = this.history.findIndex((h) => h.role === 'user' && h.turn === seq);
+    if (cut < 0) {
+      // Tasks from before turns were tagged: match user events to history entries in order.
+      let from = 0;
+      for (const e of this.events.slice(0, seq + 1)) {
+        if (e.type !== 'user') continue;
+        const i = this.history.findIndex((h, j) => j >= from && h.role === 'user' && h.content === e.text);
+        if (i < 0) { cut = -1; break; }
+        cut = i;
+        from = i + 1;
+      }
+      if (cut < 0) throw new Error('Could not find that message in the conversation');
+    }
+    this.history.length = cut;
+    this.events.length = seq;
+    fs.writeFileSync(path.join(this.dir, 'history.json'), JSON.stringify(this.history));
+    fs.writeFileSync(path.join(this.dir, 'events.jsonl'), this.events.map((e) => JSON.stringify(e) + '\n').join(''));
+    this.start(text);
+  }
+
   start(text) {
     if (this.status === 'running') throw new Error('Task is already running');
     const settings = loadSettings();
@@ -92,7 +120,7 @@ class Task {
       approve: (req) => this.prompt('approval', req),
     });
     this.status = 'running';
-    agent.run(text).finally(() => {
+    agent.run(text, this.events.length - 1).finally(() => {
       try { fs.writeFileSync(path.join(this.dir, 'history.json'), JSON.stringify(this.history)); } catch { /* ignore */ }
       this.abort = null;
       this.pending.clear();

@@ -18,7 +18,7 @@
     tools: new Map(),   // tool call id -> frame
     frames: [],         // one per tool call: what the Computer panel can show
     sel: -1, live: true, panelOpen: false, panelTab: 'live',
-    plan: [], lastSeq: -1,
+    plan: [], lastSeq: -1, lastUser: null, // lastUser: the newest user event, which retry re-runs
     hidden: new Set(),  // tasks deleted but still undoable
     playPath: null, playNonce: 0, // what the Play tab runs: a page/game, or a 3D model in the viewer
     attach: [], draft: null,      // files attached in the composer; draft = task made to hold them before the first message
@@ -209,7 +209,7 @@
   /* ---------- Task view ---------- */
   function resetView() {
     if (state.es) { state.es.close(); state.es = null; }
-    state.tools.clear(); state.frames = []; state.sel = -1; state.live = true; state.plan = []; state.lastSeq = -1;
+    state.tools.clear(); state.frames = []; state.sel = -1; state.live = true; state.plan = []; state.lastSeq = -1; state.lastUser = null;
     $('#timeline').innerHTML = '';
     renderProgress();
     renderPanel();
@@ -241,6 +241,7 @@
     pill.className = 'pill ' + s;
     pill.textContent = { running: 'Working', done: 'Done', error: 'Error', stopped: 'Stopped' }[s] || '';
     $('#stop').hidden = !state.running;
+    document.body.classList.toggle('busy', state.running);
     $('#send').hidden = state.running;
     updateSend();
     $('#input').placeholder = state.running ? 'Answer Freehand\'s questions here, or press stop' : state.current ? 'Reply or ask for a follow-up' : 'Describe a task';
@@ -484,7 +485,7 @@
     switch (ev.type) {
       case 'status': setStatus(ev.status); loadTasks(); if (ev.status !== 'running' && state.panelTab === 'files') renderPanel(); break;
       case 'title': $('#task-title-text').textContent = ev.title; loadTasks(); break;
-      case 'user': add(el('div', 'msg-user', esc(ev.text))); break;
+      case 'user': state.lastUser = ev; add(userMessage(ev)); break;
       case 'plan': state.plan = ev.steps; renderProgress(); break;
       case 'thought': add(el('div', 'msg-ai thought', esc(ev.text))); break;
       case 'step_note': if (ev.text) { const n = el('div', 'note ok'); n.append(ic('check-circle'), el('span', '', esc(ev.text))); add(n); } break;
@@ -520,7 +521,7 @@
       case 'ask': add(askCard(ev)); break;
       case 'resolved': { const c = document.querySelector(`[data-pid="${ev.id}"]`); if (c) { c.classList.add('resolved'); $$('button,input', c).forEach((b) => (b.disabled = true)); } break; }
       case 'final': add(finalBlock(ev)); break;
-      case 'error': add(el('div', 'error-box', esc(ev.message))); break;
+      case 'error': { const turn = state.lastUser; const box = el('div', 'error-turn'); box.append(el('div', 'error-box', esc(ev.message)), msgActions({ retry: turn })); add(box); break; }
     }
   }
 
@@ -587,8 +588,70 @@
       c.append(box);
     }
     const done = el('div', 'done-row'); done.append(ic('check-circle'), document.createTextNode('Task done'));
-    c.append(done);
+    const foot = el('div', 'final-foot'); foot.append(done, msgActions({ copy: ev.message, retry: state.lastUser }));
+    c.append(foot);
     return c;
+  }
+
+  /* ---------- Message actions: copy, edit, retry ---------- */
+  function actionBtn(iconName, label, onClick, cls = '') {
+    const b = el('button', 'icon-btn ' + cls); b.type = 'button'; b.title = label; b.setAttribute('aria-label', label);
+    b.append(ic(iconName));
+    b.addEventListener('click', onClick);
+    return b;
+  }
+  // copy: text to copy; retry: the user event to run again; edit: the user event to edit in place.
+  function msgActions({ copy, retry, edit, bubble }) {
+    const row = el('div', 'msg-actions');
+    if (copy !== undefined) {
+      const b = actionBtn('copy', 'Copy', async () => {
+        try { await navigator.clipboard.writeText(copy); } catch { return toast('Could not copy', { error: true }); }
+        setIcon(b, 'check');
+        setTimeout(() => setIcon(b, 'copy'), 1200);
+      });
+      row.append(b);
+    }
+    if (edit) row.append(actionBtn('pencil-simple', 'Edit', () => editMessage(edit, bubble, row), 'needs-idle'));
+    if (retry) row.append(actionBtn('arrow-clockwise', 'Retry', () => rewind(retry.seq, retry.text), 'needs-idle'));
+    return row;
+  }
+  function userMessage(ev) {
+    const wrap = el('div', 'user-turn');
+    const bubble = el('div', 'msg-user', esc(ev.text));
+    wrap.append(bubble, msgActions({ copy: ev.text, edit: ev, retry: ev, bubble }));
+    return wrap;
+  }
+  function editMessage(ev, bubble, row) {
+    const box = el('div', 'msg-edit');
+    const ta = el('textarea'); ta.value = ev.text; ta.rows = Math.min(10, ev.text.split('\n').length + 1); ta.setAttribute('aria-label', 'Edit message');
+    const bar = el('div', 'msg-edit-bar');
+    const cancel = el('button', 'btn', 'Cancel'); cancel.type = 'button';
+    const send = el('button', 'btn btn-primary', 'Send'); send.type = 'button';
+    bar.append(cancel, send);
+    box.append(ta, bar);
+    bubble.hidden = true; row.hidden = true;
+    bubble.after(box);
+    ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length);
+    const close = () => { box.remove(); bubble.hidden = false; row.hidden = false; };
+    const go = () => { const t = ta.value.trim(); if (!t) return; close(); rewind(ev.seq, t); };
+    cancel.addEventListener('click', close);
+    send.addEventListener('click', go);
+    ta.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); close(); }
+      else if (e.key === 'Enter' && !e.isComposing) {
+        const ctrlMode = state.settings && state.settings.ui.enterSends === 'ctrl';
+        if (ctrlMode ? e.ctrlKey || e.metaKey : !e.shiftKey) { e.preventDefault(); go(); }
+      }
+    });
+  }
+  // Cuts the chat back to the message at `seq` and runs `text` from there; the timeline is replayed.
+  async function rewind(seq, text) {
+    if (state.running || !state.current) return;
+    const id = state.current;
+    try {
+      await api(`/tasks/${id}/rewind`, { method: 'POST', body: { seq, text } });
+      openTask(id);
+    } catch (e) { toast(e.message, { error: true }); }
   }
 
   /* ---------- Composer ---------- */

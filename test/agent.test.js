@@ -270,3 +270,36 @@ test('server: auth token, host check, full task over HTTP with approval + ask', 
 
   srv.close(); mock.close();
 });
+
+test('tasks: rewind cuts the chat back to a message and runs it again (edit and retry)', async () => {
+  const mock = await mockProvider((body) => {
+    const last = body.messages[body.messages.length - 1].content;
+    return { message: text(JSON.stringify({ title: 'T', answer: 'echo ' + last.split('Request:\n').pop() })) };
+  });
+  writeSettings(home, settingsFor(mock.url));
+  const { Task } = require('../src/server/tasks');
+  const t = Task.create();
+  const finals = () => t.events.filter((e) => e.type === 'final').map((e) => e.message);
+  const idle = () => waitFor(() => t.status !== 'running' && !t.abort);
+  t.start('one'); await idle();
+  t.start('two'); await idle();
+  assert.deepEqual(finals(), ['echo one', 'echo two']);
+  const second = t.events.filter((e) => e.type === 'user')[1].seq;
+
+  t.rewind(second, 'TWO'); await idle(); // edit
+  assert.deepEqual(finals(), ['echo one', 'echo TWO']);
+  assert.deepEqual(t.history.filter((h) => h.role === 'user').map((h) => h.content), ['one', 'TWO']);
+
+  t.rewind(second, 'TWO'); await idle(); // retry
+  assert.deepEqual(finals(), ['echo one', 'echo TWO']);
+  assert.equal(t.events.filter((e) => e.type === 'user').length, 2);
+  const reloaded = Task.load(t.id);
+  assert.deepEqual(reloaded.events.map((e) => e.seq), reloaded.events.map((_, i) => i), 'events on disk match the rewound timeline');
+
+  // Tasks saved before turns were tagged still rewind, by matching message text.
+  for (const h of t.history) delete h.turn;
+  t.rewind(t.events.filter((e) => e.type === 'user')[0].seq, 'uno'); await idle();
+  assert.deepEqual(finals(), ['echo uno']);
+  assert.throws(() => t.rewind(1, 'x'), /cannot be edited/);
+  mock.close();
+});
