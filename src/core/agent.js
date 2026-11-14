@@ -358,6 +358,7 @@ class Agent {
       }
       this.emit('tool_result', { id: call.id, ok, preview: truncate(output, TOOL_RESULT_FOR_UI) });
       this.trackGame(call, ok, output);
+      if (ok && ['file_write', 'file_edit'].includes(call.name)) this.lastCalls = []; // the files changed, so repeating a test or run is new work
       this.failStreak = ok ? 0 : this.failStreak + 1;
       if (this.failStreak === 3) {
         output += '\n\nThree tool calls in a row have failed. Stop and think: re-read the errors, check your assumptions (file names, paths, what is installed), and try a different approach or call revise_plan.';

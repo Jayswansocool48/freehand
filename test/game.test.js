@@ -243,3 +243,22 @@ test('agent recovers tool calls written as text and does not stop early on a pla
   assert.deepEqual(events.filter((e) => e.type === 'step_note').map((e) => e.text), ['wrote notes.md', 'checked']);
   assert.ok(agent.history.some((h) => h.role === 'user' && /plan is not finished \(current step: "Check it"\)/.test(h.content)));
 });
+
+test('agent may repeat play_test after changing a file (loop guard resets on edits)', async () => {
+  const mock = await mockProvider((body) => {
+    if (!body.tools) return { message: text('{"title":"Game","steps":["Build it"]}') };
+    const n = body.messages.filter((m) => m.role === 'tool').length;
+    const seq = [
+      toolCall('file_write', { path: 'a.txt', content: '1' }), toolCall('file_list', {}),
+      toolCall('file_write', { path: 'a.txt', content: '2' }), toolCall('file_list', {}),
+      toolCall('file_write', { path: 'a.txt', content: '3' }), toolCall('file_list', {}),
+      toolCall('finish', { message: 'ok' }),
+    ];
+    return { message: seq[n] };
+  });
+  const ws = fs.mkdtempSync(path.join(home, 'ws-'));
+  const agent = new Agent({ settings: settingsFor(mock.url), workspace: ws, signal: new AbortController().signal, history: [], emit: () => {}, ask: async () => '', approve: async () => true });
+  await agent.run('go');
+  mock.close();
+  assert.equal(agent.history.filter((h) => h.role === 'tool' && /exact call several times/.test(h.content)).length, 0);
+});

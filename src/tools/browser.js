@@ -194,6 +194,7 @@ class BrowserSession {
         `Title: ${info.title || '(none)'} · canvases: ${info.canvases.length ? info.canvases.join(', ') : 'none'}`,
         done.length ? `Inputs: ${done.join(' | ')}` : 'Inputs: none',
         errors.length ? `ERRORS (${errors.length}), fix these:\n${uniq(errors).slice(0, 15).join('\n')}` : 'Errors: none',
+        ...hintsFor([...errors, ...failed].join('\n')),
         failed.length ? `FILES THAT FAILED TO LOAD:\n${uniq(failed).slice(0, 15).join('\n')}` : 'Failed loads: none',
         consoleLines.length ? `Console:\n${uniq(consoleLines).slice(-15).join('\n')}` : '',
         info.text ? `Visible text:\n${info.text}` : 'Visible text: none',
@@ -210,6 +211,17 @@ class BrowserSession {
     this.page = null;
   }
 }
+
+/** Plain-language fixes for the mistakes small models make most in web games. */
+const HINTS = [
+  [/THREE is not defined/, 'HOW TO FIX: three.js is loaded as a module, so there is no global THREE. Put the game code in <script type="module"> and start it with: import * as THREE from \'three\';'],
+  [/Cannot use import statement outside a module/, 'HOW TO FIX: add type="module" to the <script> tag that uses import.'],
+  [/Failed to resolve module specifier|Relative references must start with/, 'HOW TO FIX: add the import map to <head> before any module script: <script type="importmap">{"imports": {"three": "https://unpkg.com/three@0.180.0/build/three.module.js", "three/addons/": "https://unpkg.com/three@0.180.0/examples/jsm/"}}</script>'],
+  [/(GLTFLoader|OrbitControls|OBJLoader|FBXLoader) is not (defined|a constructor)|THREE\.(GLTFLoader|OrbitControls|OBJLoader|FBXLoader)/, 'HOW TO FIX: add-ons are separate imports, e.g. import { GLTFLoader } from \'three/addons/loaders/GLTFLoader.js\'; and import { OrbitControls } from \'three/addons/controls/OrbitControls.js\'; then use new GLTFLoader(), not THREE.GLTFLoader.'],
+  [/\.(glb|gltf|obj|fbx|png|jpe?g|mp3|wav|ogg)\b[^\n]*(404|ERR_FILE_NOT_FOUND)/i, 'HOW TO FIX: a file the game loads does not exist at that path. Check the name with file_list (paths are relative to the HTML file), or make the model with make_model.'],
+  [/Cannot read properties of (null|undefined) \(reading '(addEventListener|getContext|appendChild|textContent|innerHTML|style)'\)/, 'HOW TO FIX: the code looks up an element that is not there yet or has a different id. Check the ids match, and run the code after the element exists (put the script at the end of <body> or use type="module").'],
+];
+function hintsFor(text) { return HINTS.filter(([re]) => re.test(text)).map(([, hint]) => hint); }
 
 /** Chromium builds already in the Playwright cache, newest first, even if they are not the exact revision this Playwright wants. */
 function cachedChromiums() {
