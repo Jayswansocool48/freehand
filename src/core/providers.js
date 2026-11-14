@@ -32,6 +32,48 @@ function authHeaders(settings, providerId) {
   return headers;
 }
 
+/** Folds an OpenAI-style SSE stream back into the shape of a non-streamed response. */
+async function readStream(res) {
+  const decoder = new TextDecoder();
+  const message = { content: '', tool_calls: [] };
+  let finishReason = null;
+  let error = null;
+  let buf = '';
+  const onData = (line) => {
+    if (!line.startsWith('data:')) return;
+    const payload = line.slice(5).trim();
+    if (!payload || payload === '[DONE]') return;
+    const chunk = JSON.parse(payload);
+    if (chunk.error) { error = chunk.error; return; }
+    const choice = chunk.choices && chunk.choices[0];
+    if (!choice) return;
+    if (choice.finish_reason) finishReason = choice.finish_reason;
+    const d = choice.delta || {};
+    if (typeof d.content === 'string') message.content += d.content;
+    for (const tc of d.tool_calls || []) {
+      const i = Number.isInteger(tc.index) ? tc.index : message.tool_calls.length;
+      const slot = message.tool_calls[i] || (message.tool_calls[i] = { id: '', function: { name: '', arguments: '' } });
+      if (tc.id) slot.id = tc.id;
+      if (tc.function && tc.function.name) slot.function.name += tc.function.name;
+      const a = tc.function && tc.function.arguments;
+      if (typeof a === 'string') slot.function.arguments += a;
+      else if (a && typeof a === 'object') slot.function.arguments = a;
+    }
+  };
+  for await (const chunk of res.body) {
+    buf += decoder.decode(chunk, { stream: true });
+    let nl;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      onData(buf.slice(0, nl).trim());
+      buf = buf.slice(nl + 1);
+    }
+  }
+  onData(buf.trim());
+  if (error) return { error };
+  message.tool_calls = message.tool_calls.filter(Boolean);
+  return { choices: [{ message, finish_reason: finishReason }] };
+}
+
 /** One request to one provider. Throws ProviderError. */
 async function chatOnce({ settings, providerId, messages, tools, signal }) {
   const p = settings.providers[providerId];
@@ -43,7 +85,9 @@ async function chatOnce({ settings, providerId, messages, tools, signal }) {
     throw new ProviderError(`${preset.label} needs an API key. Add it in Settings.`, 401);
   }
 
-  const body = { model: p.model, messages, temperature: 0.3, stream: false };
+  // Streamed so headers arrive at the first token: Node's fetch drops a request whose
+  // headers take over 5 minutes, which a slow local model writing a whole file can hit.
+  const body = { model: p.model, messages, temperature: 0.3, stream: true };
   if (tools && tools.length) {
     body.tools = tools.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.parameters } }));
   }
@@ -74,7 +118,13 @@ async function chatOnce({ settings, providerId, messages, tools, signal }) {
   }
 
   let data;
-  try { data = await res.json(); } catch { throw new ProviderError(`${providerId} sent an unreadable response`, res.status, { retryable: true }); }
+  try {
+    data = /text\/event-stream/.test(res.headers.get('content-type') || '') ? await readStream(res) : await res.json();
+  } catch (e) {
+    if (signal && signal.aborted) throw e;
+    throw new ProviderError(`${providerId} sent an unreadable response`, res.status, { retryable: true });
+  }
+  if (data.error) throw new ProviderError(`${providerId} error: ${data.error.message || data.error}`, res.status, { retryable: true });
   const choice = data.choices && data.choices[0];
   if (!choice || !choice.message) throw new ProviderError(`${providerId} returned no message`, res.status, { retryable: true });
   const m = choice.message;

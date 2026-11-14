@@ -169,6 +169,35 @@ test('providers: falls through to the next provider on failure', async () => {
   assert.ok(events.some((e) => e.type === 'notice' && /Switching to groq/.test(e.text)));
 });
 
+test('providers: asks for a stream and rebuilds text and split tool calls from it', async () => {
+  const http = require('http');
+  const { chat } = require('../src/core/providers');
+  const chunks = [
+    { choices: [{ delta: { content: 'Writing ' } }] },
+    { choices: [{ delta: { content: 'it.' } }] },
+    { choices: [{ delta: { tool_calls: [{ index: 0, id: 'c1', function: { name: 'write_file', arguments: '{"path":"a.txt",' } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '"content":"hi"}' } }] }, finish_reason: 'tool_calls' }] },
+  ];
+  let sawStream = false;
+  const srv = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      sawStream = JSON.parse(raw).stream === true;
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      for (const c of chunks) res.write(`data: ${JSON.stringify(c)}\n\n`);
+      res.end('data: [DONE]\n\n');
+    });
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const r = await chat({ settings: settingsFor(`http://127.0.0.1:${srv.address().port}/v1`), messages: [{ role: 'user', content: 'x' }] });
+  srv.close();
+  assert.ok(sawStream);
+  assert.equal(r.content, 'Writing it.');
+  assert.deepEqual(r.toolCalls, [{ id: 'c1', name: 'write_file', args: { path: 'a.txt', content: 'hi' }, parseError: false }]);
+  assert.equal(r.finishReason, 'tool_calls');
+});
+
 test('agent: stop aborts a running task cleanly', async () => {
   const mock = await mockProvider((body) => {
     if (!body.tools) return { message: text('{"title":"T","steps":["x"]}') };
