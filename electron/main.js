@@ -1,6 +1,9 @@
 'use strict';
 const { app, BrowserWindow, shell, Menu, ipcMain, dialog } = require('electron');
 const path = require('path');
+const fs = require('fs');
+const os = require('os');
+const { spawn } = require('child_process');
 const { startServer } = require('../src/server');
 const { autoUpdater } = require('electron-updater');
 
@@ -21,19 +24,21 @@ async function createWindow() {
     height: 900,
     minWidth: 900,
     minHeight: 600,
-    backgroundColor: '#f8fafc',
+    backgroundColor: '#efefeb',
     title: 'Freehand',
     autoHideMenuBar: true,
     // No OS title bar: the app draws its own top bar and only the native min / max / close buttons are overlaid.
     titleBarStyle: 'hidden',
-    ...(process.platform !== 'darwin' ? { titleBarOverlay: { color: '#f8fafc', symbolColor: '#1e293b', height: 48 } } : { trafficLightPosition: { x: 16, y: 16 } }),
+    ...(process.platform !== 'darwin' ? { titleBarOverlay: { color: '#efefeb', symbolColor: '#1c1f24', height: 52 } } : { trafficLightPosition: { x: 16, y: 16 } }),
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: process.platform !== 'linux' },
   });
   ipcMain.on('freehand:chrome', (e, c) => {
     const ok = (v) => /^#[0-9a-fA-F]{3,8}$/.test(v);
     if (!win || win.isDestroyed() || e.sender !== win.webContents || !ok(c.color) || !ok(c.symbolColor)) return;
-    try { win.setTitleBarOverlay({ color: c.color, symbolColor: c.symbolColor, height: 48 }); win.setBackgroundColor(c.color); } catch { /* not supported on this platform */ }
+    try { win.setTitleBarOverlay({ color: c.color, symbolColor: c.symbolColor, height: 52 }); win.setBackgroundColor(c.color); } catch { /* not supported on this platform */ }
   });
+  ipcMain.on('freehand:open-data', (e) => { if (e.sender === win.webContents) shell.openPath(process.env.FREEHAND_HOME); });
+  ipcMain.on('freehand:uninstall', (e) => { if (e.sender === win.webContents) uninstall(); });
   Menu.setApplicationMenu(null);
   // Links the agent writes into answers open in the system browser, never inside the app.
   win.webContents.setWindowOpenHandler(({ url }) => { if (/^https?:/i.test(url)) shell.openExternal(url); return { action: 'deny' }; });
@@ -56,6 +61,34 @@ function setupUpdates() {
   const check = () => autoUpdater.checkForUpdates().catch(() => {});
   check();
   setInterval(check, 6 * 60 * 60 * 1000);
+}
+
+// Removes the app, its menu entries and all data, then quits. Ollama and its models are left alone.
+async function uninstall() {
+  const { response } = await dialog.showMessageBox(win, { type: 'warning', buttons: ['Uninstall', 'Cancel'], defaultId: 1, cancelId: 1, title: 'Uninstall Freehand', message: 'Uninstall Freehand and delete all your tasks and settings?', detail: 'This can\'t be undone. Ollama and its models stay installed.' });
+  if (response !== 0) return;
+  if (backend) backend.close();
+  const rm = (p) => { try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* already gone */ } };
+  rm(app.getPath('userData'));
+  if (process.platform === 'win32') {
+    const un = path.join(path.dirname(process.execPath), 'Uninstall Freehand.exe');
+    if (fs.existsSync(un)) spawn(un, ['/S'], { detached: true, stdio: 'ignore' }).unref();
+  } else {
+    const image = process.env.APPIMAGE;
+    const apps = path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share'), 'applications');
+    // Only menu entries that launch this AppImage, plus install.sh's own entry and command.
+    try {
+      for (const f of fs.readdirSync(apps)) {
+        if (!/freehand/i.test(f) || !f.endsWith('.desktop')) continue;
+        const text = fs.readFileSync(path.join(apps, f), 'utf8');
+        if ((image && text.includes(image)) || /^Name=Freehand$/m.test(text)) rm(path.join(apps, f));
+      }
+    } catch { /* no applications folder */ }
+    const bin = path.join(os.homedir(), '.local', 'bin', 'freehand');
+    try { if (image && fs.realpathSync(bin) === fs.realpathSync(image)) rm(bin); } catch { /* not linked */ }
+    if (image) rm(image);
+  }
+  app.exit(0);
 }
 
 app.on('second-instance', () => { if (win) { if (win.isMinimized()) win.restore(); win.focus(); } });

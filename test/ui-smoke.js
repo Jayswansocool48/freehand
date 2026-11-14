@@ -20,7 +20,9 @@ const assert = require('node:assert/strict');
   await new Promise((r) => site.listen(0, '127.0.0.1', r));
   const siteUrl = `http://127.0.0.1:${site.address().port}/`;
 
+  let plannerSystem = '';
   const mock = await mockProvider((body) => {
+    if (!body.tools) plannerSystem = body.messages[0].content;
     if (!body.tools) return { message: text('{"title":"Compare note apps","steps":["Write the comparison","Check the source page","Verify output"]}') };
     const n = body.messages.filter((m) => m.role === 'tool').length;
     return { message: [
@@ -36,21 +38,33 @@ const assert = require('node:assert/strict');
   const s = defaultSettings(); s.active = 'custom'; s.providers.custom.baseUrl = mock.url; s.providers.custom.model = 'qwen3:8b'; s.approval = 'ask';
   writeSettings(home, s);
   const srv = await startServer({ port: 0 });
-  const browser = await chromium.launch({ channel: 'chrome', args: ['--no-sandbox'] });
+  // CHROME=/path/to/chrome uses that binary; otherwise the installed Google Chrome.
+  const browser = await chromium.launch(process.env.CHROME ? { executablePath: process.env.CHROME, args: ['--no-sandbox'] } : { channel: 'chrome', args: ['--no-sandbox'] });
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   const problems = [];
   page.on('console', (m) => { if (['error', 'warning'].includes(m.type())) problems.push(m.type() + ': ' + m.text()); });
   page.on('pageerror', (e) => problems.push('pageerror: ' + e.message));
   await page.goto(srv.url);
-  await page.waitForSelector('.home-chip');
+  await page.waitForSelector('.chip');
   await page.waitForTimeout(600);
   await page.screenshot({ path: path.join(OUT, '1-home.png') });
-  await page.click('.home-chip >> nth=0');
+  // Effort picker in the composer, like Claude's
+  await page.click('#effort-chip');
+  await page.waitForSelector('#model-pop .menu-item');
+  await page.waitForTimeout(500);
+  await page.locator('#model-pop').screenshot({ path: path.join(OUT, '1b-effort.png') });
+  assert.equal(await page.locator('#model-pop .menu-item', { hasText: 'High' }).getAttribute('aria-checked'), 'true', 'current effort is marked');
+  await page.click('#model-pop .menu-item >> text=Max');
+  await page.waitForTimeout(300);
+  assert.match(await page.textContent('#effort-chip'), /Max/);
+  await page.click('.chip >> nth=0');
   const filled = await page.inputValue('#input');
   assert.match(filled, /Research \[topic\]/);
   await page.fill('#input', 'Research 5 free note apps and write comparison.md');
   await page.keyboard.press('Enter');
   await page.waitForSelector('.approval');
+  assert.match(plannerSystem, /3-10 concrete steps/, 'Max effort reaches the planner');
+  assert.match(plannerSystem, /Effort: MAX/);
   await page.waitForTimeout(700);
   await page.screenshot({ path: path.join(OUT, '2-approval.png') });
   await page.click('.approval .btn-primary');
@@ -76,21 +90,33 @@ const assert = require('node:assert/strict');
   // files tab
   await page.click('.cp-tab[data-cp="files"]');
   await page.waitForSelector('.files-list li');
-  // dark theme + custom font
-  await page.click('#toggle-theme');
+  // dark theme from the profile menu
+  await page.click('#profile-btn');
+  await page.click('#profile-menu .menu-item >> text=Dark');
   await page.waitForTimeout(500);
   await page.screenshot({ path: path.join(OUT, '5-dark.png') });
-  await page.click('#open-settings');
-  await page.waitForSelector('#settings[open]');
-  await page.fill('#f-font', 'Cascadia Code');
+  // full-page settings with sections
+  await page.keyboard.press('Control+,');
+  await page.waitForSelector('#view-settings:not([hidden]) .theme-opt');
+  await page.fill('input[aria-label="Interface font"]', 'Cascadia Code');
+  await page.keyboard.press('Tab');
+  await page.waitForTimeout(500);
   const fam = await page.evaluate(() => getComputedStyle(document.body).fontFamily);
   assert.match(fam, /Cascadia Code/);
-  await page.waitForTimeout(700);
   await page.screenshot({ path: path.join(OUT, '6-settings.png') });
-  await page.click('#save-settings');
-  await page.waitForTimeout(900);
+  await page.click('#settings-nav button >> text=Capabilities');
+  await page.waitForTimeout(400);
+  await page.screenshot({ path: path.join(OUT, '7-capabilities.png') });
+  await page.click('#settings-nav button >> text=Models');
+  await page.waitForTimeout(400);
+  await page.screenshot({ path: path.join(OUT, '8-models.png') });
   const saved = JSON.parse(fs.readFileSync(path.join(home, 'settings.json'), 'utf8'));
-  assert.equal(saved.ui.font, 'Cascadia Code'); assert.equal(saved.ui.theme, 'dark');
-  console.log(JSON.stringify({ problems, title: await page.textContent('#task-title'), fontFamily: fam }));
+  assert.equal(saved.ui.font, 'Cascadia Code'); assert.equal(saved.ui.theme, 'dark'); assert.equal(saved.effort, 'max');
+  // Ctrl+K command menu
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('Control+k');
+  await page.waitForSelector('#cmdk:not([hidden]) .menu-item');
+  await page.screenshot({ path: path.join(OUT, '9-cmdk.png') });
+  console.log(JSON.stringify({ problems, title: await page.textContent('#task-title-text'), fontFamily: fam }));
   await browser.close(); srv.close(); mock.close(); site.close();
 })().catch((e) => { console.error('FAILED', e); process.exit(1); });

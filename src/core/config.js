@@ -67,12 +67,13 @@ function defaultSettings() {
     fallback: [], // provider ids tried in order when the active one is rate-limited/unreachable
     providers,
     approval: 'ask', // 'ask' = confirm shell/python commands, 'auto' = run without asking
+    effort: 'high', // 'low' | 'medium' | 'high' | 'max': how hard Freehand works on each request
     maxSteps: 40,
     contextChars: 48000,
     browserHeadless: true,
     search: { provider: 'duckduckgo', braveKey: '' },
     // font: '' means "use the operating system's UI font"; any installed font name can be typed in.
-    ui: { theme: 'light', font: '', monoFont: '' },
+    ui: { theme: 'system', font: '', monoFont: '', chatFont: 'sans', enterSends: 'enter', reduceMotion: false },
   };
 }
 
@@ -127,11 +128,15 @@ function publicSettings(settings) {
 function applyPatch(settings, patch) {
   const next = JSON.parse(JSON.stringify(settings));
   for (const k of ['active', 'approval', 'browserHeadless']) if (patch[k] !== undefined) next[k] = patch[k];
+  if (['low', 'medium', 'high', 'max'].includes(patch.effort)) next.effort = patch.effort;
   if (Array.isArray(patch.fallback)) next.fallback = patch.fallback.filter((id) => next.providers[id]);
   if (Number.isFinite(patch.maxSteps)) next.maxSteps = Math.min(200, Math.max(5, Math.floor(patch.maxSteps)));
   if (Number.isFinite(patch.contextChars)) next.contextChars = Math.min(400000, Math.max(8000, Math.floor(patch.contextChars)));
   if (patch.ui) {
     if (['light', 'dark', 'system'].includes(patch.ui.theme)) next.ui.theme = patch.ui.theme;
+    if (['sans', 'serif', 'system', 'mono'].includes(patch.ui.chatFont)) next.ui.chatFont = patch.ui.chatFont;
+    if (['enter', 'ctrl'].includes(patch.ui.enterSends)) next.ui.enterSends = patch.ui.enterSends;
+    if (typeof patch.ui.reduceMotion === 'boolean') next.ui.reduceMotion = patch.ui.reduceMotion;
     for (const f of ['font', 'monoFont']) if (typeof patch.ui[f] === 'string') next.ui[f] = patch.ui[f].replace(/[^\p{L}\p{N} _.\-]/gu, '').trim().slice(0, 60);
   }
   if (patch.providers) {

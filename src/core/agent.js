@@ -9,13 +9,28 @@ const { stripThinking, extractJson, truncate, safePath } = require('./util');
 const TOOL_RESULT_FOR_MODEL = 6000;
 const TOOL_RESULT_FOR_UI = 3500;
 
-const PLANNER_PROMPT = `You are the planning module of Freehand, an autonomous agent that can search the web, browse, read/write files and run code on the user's computer.
-Given the user's request, reply with ONLY a JSON object, no other text:
-- If the request needs real work: {"title": "<3-6 word title>", "steps": ["<imperative step>", ...]} with 2-7 concrete steps.
-- If it is a simple question or chat that needs no tools: {"title": "<3-6 word title>", "answer": "<your complete answer in Markdown>"}.
-Prefer the fewest steps that get a verified result. Do not include a "write the final answer" step; finishing is automatic.`;
+/**
+ * Effort levels, like Claude's: how much work Freehand puts into one request.
+ * steps: plan length the planner may use; turns: share of the "most tool steps" setting; context: share of contextChars.
+ */
+const EFFORT = {
+  low: { steps: '1-3', turns: 0.4, context: 0.6, work: 'Effort: LOW. Be quick. One good source is enough. Skip extra checks and finish as soon as the request is answered.' },
+  medium: { steps: '2-5', turns: 0.7, context: 0.8, work: 'Effort: MEDIUM. Check important facts against a second source when it is cheap to do so.' },
+  high: { steps: '2-7', turns: 1, context: 1, work: 'Effort: HIGH. Check more than one source for facts that matter, and run or read back what you make before finishing.' },
+  max: { steps: '3-10', turns: 2.5, context: 1.6, work: 'Effort: MAX. Be thorough. Confirm every important fact in at least two independent sources, test every script you write, read back every file you save, and before finish review the whole result against the request and fix anything missing.' },
+};
+const effortOf = (settings) => EFFORT[settings.effort] || EFFORT.high;
 
-function systemPrompt({ plan, mode, tools, workspace }) {
+function plannerPrompt(effort) {
+  return `You are the planning module of Freehand, an autonomous agent that can search the web, browse, read/write files and run code on the user's computer.
+Given the user's request, reply with ONLY a JSON object, no other text:
+- If the request needs real work: {"title": "<3-6 word title>", "steps": ["<imperative step>", ...]} with ${effort.steps} concrete steps.
+- If it is a simple question or chat that needs no tools: {"title": "<3-6 word title>", "answer": "<your complete answer in Markdown>"}.
+Prefer the fewest steps that get a verified result. Do not include a "write the final answer" step; finishing is automatic.
+${effort.work}`;
+}
+
+function systemPrompt({ plan, mode, tools, effort }) {
   const lines = [
     `You are Freehand, an autonomous agent that completes tasks end to end on the user's own computer. Today is ${new Date().toDateString()}. Platform: ${process.platform}.`,
     `Your workspace folder is the current directory; every file path you use is relative to it. Save deliverables (reports, code, data, HTML) as files there, not just in chat.`,
@@ -29,6 +44,7 @@ function systemPrompt({ plan, mode, tools, workspace }) {
     '- Keep tool inputs small. Write big files with file_write rather than printing them.',
     '- Use ask_user only when you are genuinely blocked.',
     '- The final answer (finish.message) should be clear, concise Markdown that answers the request and points to the files you made.',
+    `- ${effort.work}`,
     '',
     'PLAN (status in brackets):',
     ...plan.map((s, i) => `${i + 1}. [${s.status}] ${s.text}`),
@@ -82,6 +98,7 @@ class Agent {
     this.callCounter = 0;
     this.browserSession = null;
     this.lastCalls = [];
+    this.effort = effortOf(settings);
   }
 
   browser() {
@@ -120,7 +137,7 @@ class Agent {
 
   render(mode) {
     // Trim old tool output when the conversation outgrows the context budget (keep newest, keep first user turn).
-    const budget = this.settings.contextChars;
+    const budget = Math.round(this.settings.contextChars * this.effort.context);
     let used = 0;
     const items = this.history.map((h) => ({ ...h }));
     for (let i = items.length - 1; i >= 0; i--) {
@@ -153,7 +170,7 @@ class Agent {
   async planTask(userText) {
     const recent = this.history.slice(-6).map((h) => `${h.role}: ${truncate(h.content, 600, false)}`).join('\n');
     const messages = [
-      { role: 'system', content: PLANNER_PROMPT },
+      { role: 'system', content: plannerPrompt(this.effort) },
       { role: 'user', content: (recent ? `Earlier in this conversation:\n${recent}\n\n` : '') + `Request:\n${userText}` },
     ];
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -168,7 +185,7 @@ class Agent {
   async decide() {
     const mode = this.toolMode();
     const names = this.tools.map((t) => t.name);
-    const messages = [{ role: 'system', content: systemPrompt({ plan: this.plan, mode, tools: this.tools, workspace: this.workspace }) }, ...this.render(mode)];
+    const messages = [{ role: 'system', content: systemPrompt({ plan: this.plan, mode, tools: this.tools, effort: this.effort }) }, ...this.render(mode)];
     let r;
     try {
       r = await this.callModel(messages, mode === 'native' ? this.tools : null);
@@ -242,7 +259,7 @@ class Agent {
   }
 
   async loop() {
-    const max = this.settings.maxSteps;
+    const max = Math.max(5, Math.min(250, Math.round(this.settings.maxSteps * this.effort.turns)));
     let retries = 0;
     for (let turn = 0; turn < max; turn++) {
       if (this.signal.aborted) throw new Error('Aborted');
@@ -335,4 +352,4 @@ class Agent {
   }
 }
 
-module.exports = { Agent, parseAction };
+module.exports = { Agent, parseAction, EFFORT };

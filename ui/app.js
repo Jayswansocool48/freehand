@@ -1,17 +1,25 @@
-/* Freehand UI. No framework, no build step. Icons are Phosphor (regular), inlined from /icons. */
+/* Freehand UI. No framework, no build step. Icons are Phosphor (regular), inlined from /icons.
+   Layout follows Hatch: sidebar with recents, home greeting, one composer box, full-page settings. */
 (() => {
   'use strict';
   const $ = (s, r = document) => r.querySelector(s);
   const $$ = (s, r = document) => [...r.querySelectorAll(s)];
   const el = (tag, cls, html) => { const e = document.createElement(tag); if (cls) e.className = cls; if (html !== undefined) e.innerHTML = html; return e; };
   const esc = (s) => escapeHtml(String(s == null ? '' : s));
+  const shell = window.freehandShell || null;
+  const store = {
+    get(k) { try { return localStorage.getItem('fh.' + k); } catch { return null; } },
+    set(k, v) { try { localStorage.setItem('fh.' + k, v); } catch { /* private window */ } },
+  };
 
   const state = {
-    tasks: [], current: null, es: null, settings: null, presets: {}, running: false,
+    tasks: [], current: null, es: null, settings: null, presets: {}, info: null, running: false,
+    view: 'home', section: 'general',
     tools: new Map(),   // tool call id -> frame
     frames: [],         // one per tool call: what the Computer panel can show
     sel: -1, live: true, panelOpen: false, panelTab: 'live',
     plan: [], lastSeq: -1,
+    hidden: new Set(),  // tasks deleted but still undoable
   };
 
   /* ---------- API ---------- */
@@ -31,60 +39,172 @@
   const ic = (name, cls = 'ic') => setIcon(el('span', cls), name);
   function hydrateIcons(root = document) { $$('[data-icon]', root).forEach((n) => { if (!n.firstChild) setIcon(n, n.dataset.icon); }); }
 
+  /* ---------- Toasts (undo instead of confirm dialogs) ---------- */
+  function toast(text, opts = {}) {
+    const t = el('div', 'toast' + (opts.error ? ' error' : ''));
+    t.setAttribute('role', opts.error ? 'alert' : 'status');
+    t.append(el('span', 'grow', esc(text)));
+    const close = () => { clearTimeout(timer); t.remove(); };
+    if (opts.undo) {
+      const b = el('button', 'btn', 'Undo'); b.type = 'button';
+      b.addEventListener('click', () => { close(); opts.undo(); });
+      t.append(b);
+    }
+    $('#toasts').append(t);
+    const timer = setTimeout(() => { t.remove(); if (opts.done) opts.done(); }, opts.ms || (opts.undo ? 5000 : 2400));
+    return close;
+  }
+
   /* ---------- Appearance ---------- */
   const clean = (s) => String(s || '').replace(/[^\p{L}\p{N} _.\-]/gu, '').trim();
+  const dark = matchMedia('(prefers-color-scheme: dark)');
   function applyAppearance(ui) {
     const root = document.documentElement;
-    const theme = ui.theme === 'system' ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light') : ui.theme || 'light';
+    const theme = ui.theme === 'light' || ui.theme === 'dark' ? ui.theme : dark.matches ? 'dark' : 'light';
     root.dataset.theme = theme;
+    root.dataset.font = ui.chatFont || 'sans';
+    root.dataset.motion = ui.reduceMotion ? 'reduce' : '';
     const f = clean(ui.font), m = clean(ui.monoFont);
-    // "" = use the operating system's UI font (system-ui follows the Windows/GNOME/KDE font).
-    if (f) root.style.setProperty('--font-sans', `"${f}", system-ui, 'Segoe UI', sans-serif`); else root.style.removeProperty('--font-sans');
-    if (m) root.style.setProperty('--font-mono', `"${m}", ui-monospace, Consolas, monospace`); else root.style.removeProperty('--font-mono');
-    setIcon($('#toggle-theme'), theme === 'dark' ? 'sun' : 'moon');
+    if (f) root.style.setProperty('--sans', `"${f}", "IBM Plex Sans Variable", system-ui, sans-serif`); else root.style.removeProperty('--sans');
+    if (m) root.style.setProperty('--mono', `"${m}", "IBM Plex Mono", ui-monospace, monospace`); else root.style.removeProperty('--mono');
     // Keep the native window buttons (min / max / close) matching the app, since there is no OS title bar.
     requestAnimationFrame(() => {
       const cs = getComputedStyle(root);
-      if (window.freehandShell) window.freehandShell.setChrome({ color: cs.getPropertyValue('--background').trim(), symbolColor: cs.getPropertyValue('--foreground').trim() });
+      if (shell) shell.setChrome({ color: cs.getPropertyValue('--background').trim(), symbolColor: cs.getPropertyValue('--foreground').trim() });
     });
   }
+  dark.addEventListener('change', () => { if (state.settings) applyAppearance(state.settings.ui); });
 
-  /* ---------- Sidebar ---------- */
-  async function loadTasks() { state.tasks = (await api('/tasks')).tasks; renderTasks(); }
-  function renderTasks() {
-    const box = $('#task-list');
-    box.innerHTML = '';
-    const q = ($('#task-search').value || '').trim().toLowerCase();
-    const list = state.tasks.filter((t) => !q || t.title.toLowerCase().includes(q));
-    if (!list.length) box.append(el('div', 'empty-list', q ? 'No matches.' : 'Your tasks will show up here.'));
-    for (const t of list) {
-      const b = el('button', 'task-item' + (state.current === t.id ? ' active' : ''));
-      b.append(el('span', 'dot ' + t.status), el('span', 't', esc(t.title)));
-      const del = setIcon(el('span', 'del'), 'x');
-      del.title = 'Delete task';
-      del.addEventListener('click', async (e) => { e.stopPropagation(); if (confirm(`Delete "${t.title}" and its files?`)) { await api('/tasks/' + t.id, { method: 'DELETE' }); if (state.current === t.id) newTask(); loadTasks(); } });
-      b.append(del);
-      b.addEventListener('click', () => { openTask(t.id); if (innerWidth < 1000) setSidebar(false); });
-      box.append(b);
-    }
+  async function patchSettings(patch, msg = 'Saved') {
+    try {
+      const r = await api('/settings', { method: 'PUT', body: patch });
+      takeSettings(r);
+      if (msg) toast(msg);
+    } catch (e) { toast(e.message, { error: true }); }
+  }
+  function takeSettings(r) {
+    state.settings = r.settings; state.presets = r.presets;
+    applyAppearance(r.settings.ui);
+    renderModelChip();
+  }
+  async function loadSettings() { takeSettings(await api('/settings')); }
+  const activeProvider = () => state.settings.providers[state.settings.active];
+  const providerName = (id) => (state.presets[id] ? state.presets[id].label.replace(/\s*\(.*\)$/, '') : id);
+
+  /* ---------- Menus ---------- */
+  let openMenu = null;
+  function closeMenus() {
+    if (!openMenu) return;
+    openMenu.menu.hidden = true;
+    openMenu.button.setAttribute('aria-expanded', 'false');
+    openMenu = null;
+  }
+  function toggleMenu(button, menu, fill) {
+    const was = openMenu && openMenu.menu === menu;
+    closeMenus();
+    if (was) return;
+    menu.innerHTML = '';
+    fill(menu);
+    menu.hidden = false;
+    // Composer menus share one element; line it up with the button that opened it.
+    if (menu.id === 'model-pop') menu.style.left = button.offsetLeft + 'px';
+    button.setAttribute('aria-expanded', 'true');
+    openMenu = { button, menu };
+    const first = $('.menu-item, input', menu);
+    if (first) first.focus();
+  }
+  function menuItem(iconName, label, sub, onClick, opts = {}) {
+    const b = el('button', 'menu-item' + (opts.danger ? ' danger' : ''));
+    b.type = 'button';
+    b.setAttribute('role', opts.checked === undefined ? 'menuitem' : 'menuitemradio');
+    if (opts.checked !== undefined) b.setAttribute('aria-checked', String(opts.checked));
+    if (iconName) b.append(ic(iconName));
+    const g = el('span', 'grow'); g.append(document.createTextNode(label));
+    if (sub) g.append(el('small', '', esc(sub)));
+    b.append(g);
+    if (opts.keys) b.append(el('kbd', 'kbd', esc(opts.keys)));
+    b.addEventListener('click', (e) => { e.stopPropagation(); if (!opts.keepOpen) closeMenus(); onClick(); });
+    return b;
   }
 
-  /* ---------- View state ---------- */
-  function setHome(isHome) {
-    $('#main').classList.toggle('home', isHome);
-    if (isHome) setPanel(false);
+  /* ---------- Views ---------- */
+  function showView(v) {
+    state.view = v;
+    $('#view-home').hidden = v !== 'home';
+    $('#view-task').hidden = v !== 'task';
+    $('#view-settings').hidden = v !== 'settings';
+    // One composer, moved to whichever screen is showing.
+    const slot = v === 'home' ? '#composer-home-slot' : v === 'task' ? '#composer-task-slot' : null;
+    if (slot && $('#composer').parentElement !== $(slot)) $(slot).append($('#composer'));
+    if (v !== 'task') setPanel(false);
+    $('#new-task').setAttribute('aria-current', v === 'home' ? 'page' : 'false');
+    renderTasks();
+    if (v === 'home') renderHomeRecent();
   }
-  function setSidebar(open) {
-    state.sidebar = open;
-    $('#app').classList.toggle('sidebar-closed', !open);
-    $('#open-sidebar').hidden = open;
+  function setSidebar(collapsed) {
+    $('#app').classList.toggle('collapsed', collapsed);
+    $('#toggle-sidebar').setAttribute('aria-label', collapsed ? 'Expand sidebar' : 'Collapse sidebar');
+    store.set('collapsed', collapsed ? '1' : '0');
   }
   function setPanel(open) {
     state.panelOpen = open;
     $('#app').classList.toggle('panel-open', open);
-    $('#app').classList.toggle('panel-closed', !open);
+    $('#toggle-computer').setAttribute('aria-pressed', String(open));
   }
 
+  /* ---------- Sidebar and recents ---------- */
+  async function loadTasks() { state.tasks = (await api('/tasks')).tasks; renderTasks(); if (state.view === 'home') renderHomeRecent(); }
+  const visibleTasks = () => state.tasks.filter((t) => !state.hidden.has(t.id));
+  function renderTasks() {
+    const box = $('#task-list');
+    box.innerHTML = '';
+    const list = visibleTasks();
+    if (!list.length) box.append(el('div', 'empty-list', 'Your tasks show up here.'));
+    for (const t of list) {
+      const b = el('button', 'nav-item recent');
+      b.setAttribute('aria-current', state.view === 'task' && state.current === t.id ? 'page' : 'false');
+      b.title = t.title;
+      b.append(el('span', 'dot ' + t.status), el('span', '', esc(t.title)));
+      const del = setIcon(el('span', 'del'), 'trash');
+      del.title = 'Delete task';
+      del.setAttribute('role', 'button');
+      del.setAttribute('aria-label', `Delete ${t.title}`);
+      del.addEventListener('click', (e) => { e.stopPropagation(); deleteTask(t); });
+      b.append(del);
+      b.addEventListener('click', () => openTask(t.id));
+      box.append(b);
+    }
+  }
+  function renderHomeRecent() {
+    const list = visibleTasks().slice(0, 5);
+    $('#home-recent').hidden = !list.length;
+    const box = $('#home-recent-list');
+    box.innerHTML = '';
+    for (const t of list) {
+      const r = el('button', 'list-row'); r.type = 'button';
+      r.append(ic(t.status === 'error' ? 'warning' : t.status === 'done' ? 'check-circle' : 'chat-circle-text'), el('b', '', esc(t.title)), el('small', '', ago(t.updated)));
+      r.addEventListener('click', () => openTask(t.id));
+      box.append(r);
+    }
+  }
+  function ago(ms) {
+    const s = Math.max(0, (Date.now() - ms) / 1000);
+    if (s < 60) return 'just now';
+    if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+    if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
+    return new Date(ms).toLocaleDateString();
+  }
+  function deleteTask(t) {
+    state.hidden.add(t.id);
+    if (state.current === t.id) newTask();
+    renderTasks(); renderHomeRecent();
+    toast(`Deleted "${t.title}"`, {
+      undo: () => { state.hidden.delete(t.id); renderTasks(); renderHomeRecent(); },
+      done: () => api('/tasks/' + t.id, { method: 'DELETE' }).then(() => { state.hidden.delete(t.id); loadTasks(); }).catch((e) => toast(e.message, { error: true })),
+    });
+  }
+
+  /* ---------- Task view ---------- */
   function resetView() {
     if (state.es) { state.es.close(); state.es = null; }
     state.tools.clear(); state.frames = []; state.sel = -1; state.live = true; state.plan = []; state.lastSeq = -1;
@@ -93,28 +213,23 @@
     renderPanel();
     setStatus('idle');
   }
-
   function newTask() {
     state.current = null;
     resetView();
-    setHome(true);
-    $('#task-title').textContent = 'New task';
-    renderTasks();
+    showView('home');
     $('#input').focus();
   }
-
   function openTask(id) {
     state.current = id;
     resetView();
-    setHome(false);
-    renderTasks();
+    showView('task');
     const t = state.tasks.find((x) => x.id === id);
-    $('#task-title').textContent = t ? t.title : 'Task';
+    $('#task-title-text').textContent = t ? t.title : 'Task';
     const es = new EventSource(`/api/tasks/${id}/events`);
     state.es = es;
     es.onmessage = (m) => { const ev = JSON.parse(m.data); if (ev.seq <= state.lastSeq) return; state.lastSeq = ev.seq; handle(ev); };
+    $('#input').focus();
   }
-
   function setStatus(s) {
     state.running = s === 'running';
     const pill = $('#status-pill');
@@ -124,35 +239,43 @@
     $('#stop').hidden = !state.running;
     $('#send').hidden = state.running;
     updateSend();
-    $('#input').placeholder = state.running ? 'Freehand is working. Answer its questions here, or press stop.' : state.current ? 'Reply or give a follow-up...' : 'Describe a task...';
+    $('#input').placeholder = state.running ? 'Answer Freehand\'s questions here, or press stop' : state.current ? 'Reply or ask for a follow-up' : 'Describe a task';
+    setWorking(state.running);
     renderProgress();
   }
 
-  const timeline = () => $('#timeline');
+  const thread = () => $('#thread');
+  const nearBottom = () => { const t = thread(); return t.scrollHeight - t.scrollTop - t.clientHeight < 200; };
   function add(node, cls = '') {
-    const tl = timeline();
-    const near = tl.scrollHeight - tl.scrollTop - tl.clientHeight < 200;
-    if (node.classList.contains('step-pill')) {
-      // consecutive tool calls are grouped into one tidy activity block
-      let group = tl.lastElementChild;
-      if (!group || !group.classList.contains('activity')) { group = el('div', 'activity item'); tl.append(group); }
+    const tl = $('#timeline');
+    const near = nearBottom();
+    const working = $('.working', tl);
+    if (node.classList.contains('step')) {
+      // Consecutive tool calls group into one tidy activity block.
+      let group = working ? working.previousElementSibling : tl.lastElementChild;
+      if (!group || !group.classList.contains('activity')) { group = el('div', 'activity item'); tl.insertBefore(group, working); }
       group.append(node);
-      if (near) tl.scrollTop = tl.scrollHeight;
-      return node;
+    } else {
+      node.classList.add('item');
+      if (cls) node.classList.add(cls);
+      tl.insertBefore(node, working);
     }
-    node.classList.add('item');
-    if (cls) node.classList.add(cls);
-    tl.append(node);
-    if (near) tl.scrollTop = tl.scrollHeight;
+    if (near) thread().scrollTop = thread().scrollHeight;
     return node;
+  }
+  function setWorking(on) {
+    const tl = $('#timeline');
+    const cur = $('.working', tl);
+    if (on && !cur) { const w = el('div', 'working item'); w.append(ic('spinner-gap'), el('span', '', 'Working')); tl.append(w); }
+    if (!on && cur) cur.remove();
   }
 
   /* ---------- Frames (what the Computer panel replays) ---------- */
   const KIND = { browser: 'browser', shell: 'terminal', python: 'terminal', file_write: 'editor', file_edit: 'editor', file_read: 'editor', file_list: 'editor', web_search: 'search', web_fetch: 'search' };
-  const KIND_NAME = { browser: 'the Browser', terminal: 'the Terminal', editor: 'the Editor', search: 'Search', text: 'a tool' };
+  const KIND_NAME = { browser: 'the browser', terminal: 'the terminal', editor: 'the editor', search: 'search', text: 'a tool' };
 
   function addFrame(ev) {
-    const frame = { id: ev.id, name: ev.name, label: ev.label, icon: ev.icon, args: ev.args || {}, kind: KIND[ev.name] || 'text', status: 'running', output: '', live: '', shot: null, pill: null };
+    const frame = { id: ev.id, name: ev.name, label: ev.label, icon: ev.icon, args: ev.args || {}, kind: KIND[ev.name] || 'text', status: 'running', output: '', live: '', shot: null, row: null };
     state.frames.push(frame);
     state.tools.set(ev.id, frame);
     return frame;
@@ -160,14 +283,13 @@
   function selectFrame(i) {
     state.sel = Math.max(0, Math.min(state.frames.length - 1, i));
     state.live = state.sel === state.frames.length - 1; // viewing the newest step = following live
-    for (const f of state.frames) if (f.pill) f.pill.classList.toggle('sel', f === state.frames[state.sel]);
+    for (const f of state.frames) if (f.row) f.row.classList.toggle('sel', f === state.frames[state.sel]);
     renderPanel();
   }
-
   function renderPanel() {
     const body = $('#cp-body');
     const tl = $('#cp-timeline');
-    $$('.cp-tab').forEach((t) => t.classList.toggle('active', t.dataset.cp === state.panelTab));
+    $$('.cp-tab').forEach((t) => t.setAttribute('aria-checked', String(t.dataset.cp === state.panelTab)));
     if (state.panelTab === 'files') { tl.hidden = true; $('#cp-status').textContent = ''; return renderFiles(); }
     tl.hidden = false;
     const n = state.frames.length;
@@ -179,20 +301,20 @@
     const status = $('#cp-status');
     status.innerHTML = '';
     if (!n || state.sel < 0) {
-      body.append(el('div', 'cp-empty', 'Freehand\'s screen: browser views, terminals and files show up here as it works.'));
+      body.append(el('div', 'cp-empty', 'Browser pages, terminals and files show up here while Freehand works.'));
       return;
     }
     const f = state.frames[state.sel];
     const running = f.status === 'running';
     if (running) status.append(el('span', 'live-dot'));
-    status.append(document.createTextNode(`${running ? 'Freehand is using' : 'Freehand used'} ${KIND_NAME[f.kind]}  ·  ${state.sel + 1} / ${n}`));
+    status.append(document.createTextNode(`${running ? 'Using' : 'Used'} ${KIND_NAME[f.kind]}  ·  step ${state.sel + 1} of ${n}`));
     const out = f.output || f.live;
     if (f.kind === 'browser') {
       const url = (out.match(/^URL: (.*)$/m) || [])[1] || f.args.url || '';
       const bar = el('div', 'cp-bar'); bar.append(ic('globe'), document.createTextNode(url || f.label));
       body.append(bar);
       if (f.shot) { const img = el('img', 'cp-shot'); img.alt = 'Browser screenshot'; img.src = `/api/tasks/${state.current}/file?path=${encodeURIComponent(f.shot)}`; body.append(img); }
-      else body.append(preBlock(out || 'Starting the browser...', 'cp-pre'));
+      else body.append(preBlock(out || 'Starting the browser', 'cp-pre'));
     } else if (f.kind === 'terminal') {
       const cmd = f.name === 'python' ? f.args.code : f.args.command;
       const pre = el('pre', 'cp-pre cp-term');
@@ -201,27 +323,25 @@
       pre.append(document.createTextNode(out || (running ? '...' : '')));
       body.append(pre);
     } else if (f.kind === 'editor') {
-      const path = f.args.path || '.';
-      const bar = el('div', 'cp-bar'); bar.append(ic('file-code'), document.createTextNode(path));
+      const bar = el('div', 'cp-bar'); bar.append(ic('file-code'), document.createTextNode(f.args.path || '.'));
       body.append(bar);
-      let text = f.args.content != null ? String(f.args.content) : f.name === 'file_edit' ? `- ${f.args.find}\n+ ${f.args.replace}\n\n${out}` : out;
+      const text = f.args.content != null ? String(f.args.content) : f.name === 'file_edit' ? `- ${f.args.find}\n+ ${f.args.replace}\n\n${out}` : out;
       body.append(preBlock(text || '...', 'cp-pre'));
     } else {
       const bar = el('div', 'cp-bar'); bar.append(ic(f.icon || 'globe'), document.createTextNode(f.label));
-      body.append(bar, preBlock(out || 'Working...', 'cp-pre'));
+      body.append(bar, preBlock(out || 'Working', 'cp-pre'));
     }
     body.scrollTop = f.kind === 'terminal' ? body.scrollHeight : 0;
   }
   const preBlock = (text, cls) => { const p = el('pre', cls); p.textContent = text; return p; };
 
-  /* ---------- Files tab ---------- */
   async function renderFiles() {
     const body = $('#cp-body');
     body.innerHTML = '';
     if (!state.current) return body.append(el('div', 'cp-empty', 'Files appear here.'));
     const { tree } = await api(`/tasks/${state.current}/files`).catch(() => ({ tree: '' }));
     const lines = tree && tree !== '(empty)' ? tree.split('\n') : [];
-    if (!lines.length) return body.append(el('div', 'cp-empty', 'Files Freehand creates appear here.'));
+    if (!lines.length) return body.append(el('div', 'cp-empty', 'Files Freehand makes appear here.'));
     const ul = el('ul', 'files-list');
     const stack = [];
     for (const line of lines) {
@@ -235,7 +355,7 @@
       li.append(ic(isDir ? 'folder-open' : 'file-text'), el('span', 'nm', esc(name.replace(/\/$/, ''))));
       if (!isDir) {
         const rel = [...stack.slice(0, depth).filter(Boolean), name].join('/');
-        const dl = el('a'); dl.href = `/api/tasks/${state.current}/file?path=${encodeURIComponent(rel)}&download=1`; dl.title = 'Download'; dl.append(ic('download'));
+        const dl = el('a'); dl.href = fileUrl(rel, true); dl.title = 'Download'; dl.setAttribute('aria-label', `Download ${name}`); dl.append(ic('download'));
         dl.addEventListener('click', (e) => e.stopPropagation());
         li.append(dl);
         li.addEventListener('click', () => previewFile(rel));
@@ -244,22 +364,22 @@
     }
     body.append(ul);
   }
+  const fileUrl = (rel, download) => `/api/tasks/${state.current}/file?path=${encodeURIComponent(rel)}${download ? '&download=1' : ''}`;
   async function previewFile(rel) {
     const body = $('#cp-body');
-    const res = await fetch(`/api/tasks/${state.current}/file?path=${encodeURIComponent(rel)}`);
+    const res = await fetch(fileUrl(rel));
     body.innerHTML = '';
-    const bar = el('div', 'cp-bar'); const back = el('button', 'btn btn-sm btn-ghost', 'Back'); back.type = 'button'; back.addEventListener('click', renderFiles);
+    const bar = el('div', 'cp-bar'); const back = el('button', 'btn btn-quiet', 'Back'); back.type = 'button'; back.addEventListener('click', renderFiles);
     bar.append(back, document.createTextNode(rel));
     body.append(bar);
-    if ((res.headers.get('content-type') || '').startsWith('image/')) { const img = el('img', 'cp-shot'); img.src = `/api/tasks/${state.current}/file?path=${encodeURIComponent(rel)}`; img.alt = rel; body.append(img); }
+    if ((res.headers.get('content-type') || '').startsWith('image/')) { const img = el('img', 'cp-shot'); img.src = fileUrl(rel); img.alt = rel; body.append(img); }
     else body.append(preBlock((await res.text()).slice(0, 60000), 'cp-pre'));
   }
 
-  /* ---------- Progress bar ---------- */
+  /* ---------- Plan progress ---------- */
   function renderProgress() {
-    const bar = $('#progress');
     const steps = state.plan;
-    bar.hidden = !steps.length;
+    $('#progress').hidden = !steps.length;
     if (!steps.length) return;
     const done = steps.filter((s) => s.status === 'done').length;
     const active = steps.find((s) => s.status === 'active');
@@ -267,7 +387,7 @@
     const icn = $('#progress-icon');
     icn.className = finished ? 'done' : state.running ? 'spin' : '';
     setIcon(icn, finished ? 'check-circle' : 'spinner-gap');
-    $('#progress-cur').textContent = finished ? 'All steps complete' : active ? active.text : steps[0].text;
+    $('#progress-cur').textContent = finished ? 'Every step is done' : active ? active.text : steps[0].text;
     $('#progress-count').textContent = `${done} / ${steps.length}`;
     const list = $('#progress-list');
     list.innerHTML = '';
@@ -278,25 +398,26 @@
     }
   }
 
-  /* ---------- Event handling ---------- */
+  /* ---------- Agent events ---------- */
   function handle(ev) {
     switch (ev.type) {
       case 'status': setStatus(ev.status); loadTasks(); if (ev.status !== 'running' && state.panelTab === 'files') renderPanel(); break;
-      case 'title': $('#task-title').textContent = ev.title; loadTasks(); break;
-      case 'user': add(el('div', 'bubble', esc(ev.text)), 'row-user'); break;
+      case 'title': $('#task-title-text').textContent = ev.title; loadTasks(); break;
+      case 'user': add(el('div', 'msg-user', esc(ev.text))); break;
       case 'plan': state.plan = ev.steps; renderProgress(); break;
-      case 'thought': add(el('div', 'agent-text thought', esc(ev.text))); break;
+      case 'thought': add(el('div', 'msg-ai thought', esc(ev.text))); break;
       case 'step_note': if (ev.text) { const n = el('div', 'note ok'); n.append(ic('check-circle'), el('span', '', esc(ev.text))); add(n); } break;
       case 'notice': { const n = el('div', 'note'); n.append(ic('warning'), el('span', '', esc(ev.text))); add(n); break; }
       case 'tool': {
         const f = addFrame(ev);
-        const pill = el('button', 'step-pill running');
-        pill.type = 'button';
-        pill.append(ic(ev.icon || 'code'), el('span', 'lbl', esc(ev.label)), setIcon(el('span', 'state'), 'spinner-gap'));
-        pill.addEventListener('click', () => { setPanel(true); selectFrame(state.frames.indexOf(f)); });
-        f.pill = pill;
-        add(pill);
-        if (state.frames.length === 1) setPanel(true); // open once per task; stays closed if you close it
+        const row = el('button', 'step running');
+        row.type = 'button';
+        row.title = 'Show this step on Freehand\'s computer';
+        row.append(ic(ev.icon || 'code'), el('span', 'lbl', esc(ev.label)), setIcon(el('span', 'state ic'), 'spinner-gap'));
+        row.addEventListener('click', () => { setPanel(true); state.panelTab = 'live'; selectFrame(state.frames.indexOf(f)); });
+        f.row = row;
+        add(row);
+        if (state.frames.length === 1 && innerWidth > 1000) setPanel(true); // opens once per task; stays shut if you close it
         if (state.live) selectFrame(state.frames.length - 1); else renderPanel();
         break;
       }
@@ -306,8 +427,8 @@
         const f = state.tools.get(ev.id);
         if (!f) break;
         f.status = ev.ok ? 'ok' : 'fail'; f.output = ev.preview;
-        f.pill.classList.remove('running'); f.pill.classList.add(ev.ok ? 'ok' : 'fail');
-        setIcon($('.state', f.pill), ev.ok ? 'check-circle' : 'warning');
+        f.row.classList.remove('running'); f.row.classList.add(ev.ok ? 'ok' : 'fail');
+        setIcon($('.state', f.row), ev.ok ? 'check' : 'warning');
         if (state.frames[state.sel] === f) renderPanel();
         break;
       }
@@ -323,23 +444,22 @@
   function approvalCard(ev) {
     const c = el('div', 'card approval');
     c.dataset.pid = ev.id;
-    const head = el('div', 'card-head'); head.append(ic('warning'), el('span', '', esc(ev.title) + ': Freehand is asking for permission'));
+    const head = el('div', 'card-head'); head.append(ic('shield-check'), el('span', '', esc(ev.title) + ': allow this?'));
     const pre = el('pre'); pre.textContent = ev.detail;
     const act = el('div', 'actions');
     const ok = el('button', 'btn btn-primary', 'Allow'); ok.type = 'button';
-    const no = el('button', 'btn btn-outline', 'Deny'); no.type = 'button';
+    const no = el('button', 'btn', 'Deny'); no.type = 'button';
     ok.addEventListener('click', () => respond(ev.id, true));
     no.addEventListener('click', () => respond(ev.id, false));
     act.append(ok, no);
     c.append(head, pre, act);
     return c;
   }
-
   function askCard(ev) {
     const c = el('div', 'card');
     c.dataset.pid = ev.id;
     const head = el('div', 'card-head'); head.append(ic('question'), el('span', '', 'Freehand has a question'));
-    c.append(head, el('div', 'q', esc(ev.question)));
+    c.append(head, el('div', 'md', renderMarkdown(ev.question)));
     const act = el('div', 'actions');
     const inp = el('input'); inp.placeholder = 'Your answer'; inp.setAttribute('aria-label', 'Your answer');
     const go = el('button', 'btn btn-primary', 'Reply'); go.type = 'button';
@@ -351,7 +471,7 @@
     setTimeout(() => inp.focus(), 50);
     return c;
   }
-  function respond(id, value) { return api(`/tasks/${state.current}/respond`, { method: 'POST', body: { id, value } }); }
+  function respond(id, value) { return api(`/tasks/${state.current}/respond`, { method: 'POST', body: { id, value } }).catch((e) => toast(e.message, { error: true })); }
 
   function fileKind(name) {
     const ext = (name.split('.').pop() || '').toLowerCase();
@@ -359,20 +479,19 @@
   }
   function finalBlock(ev) {
     const c = el('div', 'final');
-    c.append(el('div', 'agent-text md', renderMarkdown(ev.message)));
+    c.append(el('div', 'msg-ai md', renderMarkdown(ev.message)));
     if (ev.files && ev.files.length) {
-      const grid = el('div', 'file-cards');
+      const box = el('div', 'files');
       for (const f of ev.files) {
-        const a = el('a', 'file-card');
-        a.href = `/api/tasks/${state.current}/file?path=${encodeURIComponent(f)}&download=1`;
-        const box = el('span', 'file-ico'); setIcon(box, /\.(py|js|html|json)$/.test(f) ? 'file-code' : 'file-text');
-        const txt = el('span', ''); txt.append(el('div', 'nm', esc(f)), el('div', 'sub', fileKind(f) + ' · Download'));
-        a.append(box, txt);
-        grid.append(a);
+        const a = el('a', 'made-file');
+        a.href = fileUrl(f, true);
+        const txt = el('span', ''); txt.append(el('b', '', esc(f)), el('small', '', fileKind(f) + ' · Download'));
+        a.append(ic(/\.(py|js|html|json)$/.test(f) ? 'file-code' : 'file-text'), txt);
+        box.append(a);
       }
-      c.append(grid);
+      c.append(box);
     }
-    const done = el('div', 'done-row'); done.append(ic('check-circle'), document.createTextNode('Task completed'));
+    const done = el('div', 'done-row'); done.append(ic('check-circle'), document.createTextNode('Task done'));
     c.append(done);
     return c;
   }
@@ -391,160 +510,344 @@
       } else {
         await api(`/tasks/${state.current}/message`, { method: 'POST', body: { text } });
       }
-    } catch (e) { add(el('div', 'error-box', esc(e.message))); }
+    } catch (e) { toast(e.message, { error: true }); }
   }
-  function updateSend() { $('#send').classList.toggle('idle', !$('#input').value.trim()); }
-  function autosize() { updateSend(); const i = $('#input'); i.style.height = 'auto'; i.style.height = Math.min(220, i.scrollHeight) + 'px'; }
+  function updateSend() { $('#send').disabled = !$('#input').value.trim(); }
+  function autosize() { updateSend(); const i = $('#input'); i.style.height = 'auto'; i.style.height = Math.min(240, i.scrollHeight) + 'px'; }
 
-  /* ---------- Settings ---------- */
-  async function loadSettings() {
-    const r = await api('/settings');
-    state.settings = r.settings; state.presets = r.presets;
-    const a = r.settings.providers[r.settings.active];
+  function renderModelChip() {
+    const s = state.settings;
+    if (!s) return;
+    const a = activeProvider();
     const chip = $('#model-chip');
     chip.innerHTML = '';
-    chip.append(el('span', 'mname', esc(a.model || 'Choose a model')), el('span', 'mprov', esc(state.presets[r.settings.active].label)), ic('caret-down'));
-    applyAppearance(r.settings.ui);
+    chip.append(ic(s.active === 'ollama' ? 'cpu' : 'globe'), el('span', '', esc(a.model || 'Choose a model')), ic('caret-down'));
+    $('#profile-model').textContent = `${a.model || 'No model'} · ${providerName(s.active)}`;
+    const effort = $('#effort-chip');
+    effort.innerHTML = '';
+    effort.append(ic('gauge'), el('span', '', esc(effortLabel(s.effort))), ic('caret-down'));
+    const safety = $('#safety-chip');
+    const ask = s.approval === 'ask';
+    safety.innerHTML = '';
+    safety.classList.toggle('warn', !ask);
+    safety.append(ic(ask ? 'shield-check' : 'warning'), el('span', '', ask ? 'Ask first' : 'Auto-run'));
   }
-
-  /* ---------- Model picker ---------- */
-  function closePop() { $('#model-pop').hidden = true; $('#model-chip').setAttribute('aria-expanded', 'false'); }
-  async function openPop() {
-    if (!state.settings) await loadSettings();
-    const pop = $('#model-pop'), s = state.settings;
-    pop.innerHTML = '';
-    for (const id of Object.keys(s.providers)) {
-      const p = s.providers[id], b = el('button', 'pop-item'); b.type = 'button';
-      const n = el('span', 'pn'); n.append(el('b', '', esc(state.presets[id].label)), el('span', '', esc(p.model || 'no model set')));
-      const ck = el('span', 'ck'); if (id === s.active) setIcon(ck, 'check');
-      b.append(n, ck);
-      b.addEventListener('click', async () => { await api('/settings', { method: 'PUT', body: { active: id } }); await loadSettings(); openPop(); });
-      pop.append(b);
-    }
-    pop.append(el('div', 'pop-sep'));
-    const a = s.providers[s.active];
-    const box = el('div', 'pop-model');
-    const input = el('input'); input.value = a.model; input.placeholder = 'model name'; input.setAttribute('list', 'pop-models'); input.setAttribute('aria-label', 'Model name');
-    const dl = el('datalist'); dl.id = 'pop-models';
-    const load = el('button', 'btn btn-outline btn-sm', 'Load'); load.type = 'button';
-    const save = async () => { if (input.value.trim() && input.value.trim() !== a.model) { await api('/settings', { method: 'PUT', body: { providers: { [s.active]: { model: input.value } } } }); await loadSettings(); } };
-    const hint = el('div', 'hint', 'Type a model name, or press Load to list what this provider offers.');
-    load.addEventListener('click', async () => {
-      load.textContent = '...';
-      const r = await api('/models?provider=' + s.active).catch((e) => ({ models: [], error: e.message }));
-      dl.innerHTML = r.models.map((m) => `<option value="${esc(m)}">`).join('');
-      hint.textContent = r.error ? r.error : `${r.models.length} models found. Click the box to pick one.`;
-      load.textContent = 'Load'; input.focus();
-    });
-    input.addEventListener('change', save);
-    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); save().then(closePop); } });
-    const row = el('div', 'mrow'); row.append(input, load);
-    box.append(el('label', '', 'Model for ' + esc(state.presets[s.active].label)), row, dl, hint);
-    pop.append(box, el('div', 'pop-sep'));
-    const more = el('button', 'pop-item'); more.type = 'button';
-    const mn = el('span', 'pn'); mn.append(el('b', '', 'Provider settings...'), el('span', '', 'Server address, API keys, add your own app'));
-    more.append(mn); more.addEventListener('click', () => { closePop(); openSettings(); });
-    pop.append(more);
-    pop.hidden = false;
-    $('#model-chip').setAttribute('aria-expanded', 'true');
-  }
-
-  const field = (label, input) => { const f = el('div', 'field'); f.append(el('label', '', label), input); return f; };
-  const selectOf = (options, value) => { const s = el('select'); for (const [v, t] of options) { const o = el('option', '', esc(t)); o.value = v; s.append(o); } s.value = value; return s; };
-
-  async function openSettings() {
-    await loadSettings();
+  function fillModelMenu(menu) {
     const s = state.settings;
+    menu.append(el('div', 'menu-label', 'Provider'));
+    for (const id of Object.keys(s.providers)) {
+      const p = s.providers[id];
+      menu.append(menuItem(id === 'ollama' ? 'cpu' : 'globe', providerName(id), p.model || 'No model set', () => patchSettings({ active: id }, `Using ${providerName(id)}`), { checked: id === s.active }));
+    }
+    menu.append(el('div', 'menu-sep'));
+    const box = el('div', 'menu-field');
+    const a = activeProvider();
+    const input = el('input'); input.value = a.model; input.placeholder = 'Model name'; input.setAttribute('list', 'pop-models'); input.setAttribute('aria-label', 'Model name');
+    const dl = el('datalist'); dl.id = 'pop-models';
+    const load = el('button', 'btn', 'List'); load.type = 'button'; load.title = 'List the models this provider offers';
+    const hint = el('div', 'hint', 'Type a model name, or press List.');
+    const save = () => { const v = input.value.trim(); if (v && v !== a.model) patchSettings({ providers: { [s.active]: { model: v } } }, `Model set to ${v}`); };
+    load.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      load.disabled = true;
+      const r = await api('/models?provider=' + s.active).catch((err) => ({ models: [], error: err.message }));
+      dl.innerHTML = r.models.map((m) => `<option value="${esc(m)}">`).join('');
+      hint.textContent = r.error ? r.error : `${r.models.length} models. Click the box to pick one.`;
+      load.disabled = false; input.focus();
+    });
+    input.addEventListener('click', (e) => e.stopPropagation());
+    input.addEventListener('change', save);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); save(); closeMenus(); } });
+    const row = el('div', 'row'); row.append(input, load);
+    box.append(el('div', 'menu-label', 'Model for ' + esc(providerName(s.active))), row, dl, hint);
+    menu.append(box, el('div', 'menu-sep'));
+    menu.append(menuItem('gear', 'Provider settings', 'Addresses, API keys, fallbacks', () => openSettings('models')));
+  }
+  const EFFORTS = [
+    ['low', 'Low', 'Fastest. Short plans, one source, few checks'],
+    ['medium', 'Medium', 'Quick, with a second source for key facts'],
+    ['high', 'High', 'The default. Checks sources and tests what it makes'],
+    ['max', 'Max', 'Slowest. Confirms everything and reviews its work'],
+  ];
+  const effortLabel = (v) => (EFFORTS.find((e) => e[0] === v) || EFFORTS[2])[1];
+  function fillEffortMenu(menu) {
+    menu.append(el('div', 'menu-label', 'Effort'));
+    for (const [v, l, sub] of EFFORTS) menu.append(menuItem(null, l, sub, () => patchSettings({ effort: v }, `Effort: ${l}`), { checked: state.settings.effort === v }));
+  }
+  function fillSafetyMenu(menu) {
+    const s = state.settings;
+    menu.append(menuItem('shield-check', 'Ask me first', 'Freehand shows each shell or Python command and waits for Allow', () => patchSettings({ approval: 'ask' }), { checked: s.approval === 'ask' }));
+    menu.append(menuItem('warning', 'Run without asking', 'Faster, but a wrong command runs before you see it', () => patchSettings({ approval: 'auto' }), { checked: s.approval === 'auto' }));
+  }
+
+  /* ---------- Settings page ---------- */
+  const SECTIONS = [
+    ['general', 'General', 'user-circle'],
+    ['models', 'Models', 'cpu'],
+    ['capabilities', 'Capabilities', 'puzzle-piece'],
+    ['shortcuts', 'Shortcuts', 'keyboard'],
+    ['about', 'About', 'info'],
+  ];
+  async function openSettings(section) {
+    if (section) state.section = section;
+    closeMenus();
+    await loadSettings().catch(() => {});
+    if (!state.info) state.info = await api('/info').catch(() => null);
+    showView('settings');
+    renderSettings();
+  }
+  function closeSettings() { if (state.current) openTask(state.current); else newTask(); }
+  function renderSettings() {
+    const nav = $('#settings-nav');
+    nav.innerHTML = '';
+    for (const [id, label, iconName] of SECTIONS) {
+      const b = el('button'); b.type = 'button';
+      b.setAttribute('aria-current', state.section === id ? 'page' : 'false');
+      b.append(ic(iconName), document.createTextNode(label));
+      b.addEventListener('click', () => { state.section = id; renderSettings(); });
+      nav.append(b);
+    }
     const body = $('#settings-body');
     body.innerHTML = '';
-    const ids = Object.keys(s.providers);
-
-    const look = el('div', 'pcard');
-    look.append(el('h3', '', '<span>Appearance</span>'), el('div', 'help', 'Leave the font blank to use your computer\'s own UI font. To use a specific one, type its exact name as it appears in your installed fonts (for example Segoe UI Variable, Cascadia Code, Comic Sans MS).'));
-    const theme = selectOf([['light', 'Light'], ['dark', 'Dark'], ['system', 'Match my system']], s.ui.theme); theme.id = 'f-theme';
-    const font = el('input'); font.id = 'f-font'; font.value = s.ui.font; font.placeholder = 'System default';
-    const mono = el('input'); mono.id = 'f-mono'; mono.value = s.ui.monoFont; mono.placeholder = 'System default (Cascadia Mono / Consolas)';
-    const r0 = el('div', 'row'); r0.append(field('Theme', theme), field('Font', font));
-    look.append(r0, field('Code font', mono));
-    // live preview while typing
-    const preview = () => applyAppearance({ theme: theme.value, font: font.value, monoFont: mono.value });
-    [theme, font, mono].forEach((x) => x.addEventListener('input', preview));
-    body.append(look);
-
-    const top = el('div', 'row');
-    const active = selectOf(ids.map((id) => [id, state.presets[id].label]), s.active); active.id = 'f-active';
-    top.append(field('Active model provider', active));
-    const appr = selectOf([['ask', 'Ask me before running commands'], ['auto', 'Run commands automatically']], s.approval); appr.id = 'f-approval';
-    top.append(field('Shell and Python safety', appr));
-    body.append(top);
-
-    const fb = el('div', 'field');
-    fb.append(el('label', '', 'Fallback providers (used when the active one is rate-limited)'));
-    const fbBox = el('div', 'seg');
-    for (const id of ids) {
-      const l = el('label', 'check'); const c = el('input'); c.type = 'checkbox'; c.value = id; c.checked = s.fallback.includes(id); c.className = 'fb';
-      l.append(c, document.createTextNode(id)); fbBox.append(l);
-    }
-    fb.append(fbBox); body.append(fb);
-
-    for (const id of ids) {
-      const p = s.providers[id], pre = state.presets[id];
-      const card = el('div', 'pcard'); card.dataset.pid = id;
-      card.append(el('h3', '', `<span>${esc(pre.label)}</span><span class="muted">${p.hasKey ? 'key saved' : pre.needsKey ? 'key needed' : ''}</span>`));
-      card.append(el('div', 'help', esc(pre.help)));
-      const url = el('input'); url.value = p.baseUrl; url.className = 'p-url';
-      const model = el('input'); model.value = p.model; model.className = 'p-model'; model.setAttribute('list', 'models-' + id);
-      const dl = el('datalist'); dl.id = 'models-' + id;
-      const key = el('input'); key.type = 'password'; key.placeholder = p.hasKey ? '(unchanged)' : pre.needsKey ? 'paste API key' : 'optional'; key.className = 'p-key'; key.autocomplete = 'off';
-      const mode = selectOf([['auto', 'Tool calling: automatic'], ['native', 'Native tool calling'], ['json', 'JSON mode (for small local models)']], p.toolMode); mode.className = 'p-mode';
-      const r1 = el('div', 'row'); r1.append(field('Base URL', url), field('Model', model));
-      const r2 = el('div', 'row'); r2.append(field('API key', key), field('Tool mode', mode));
-      const fetchBtn = el('button', 'btn btn-outline', 'Load available models'); fetchBtn.type = 'button';
-      fetchBtn.addEventListener('click', async () => {
-        fetchBtn.textContent = 'Loading...';
-        const r = await api('/models?provider=' + id);
-        dl.innerHTML = r.models.map((m) => `<option value="${esc(m)}">`).join('');
-        fetchBtn.textContent = r.error ? r.error : `${r.models.length} models loaded (click the Model box to pick)`;
-      });
-      card.append(r1, dl, r2, fetchBtn);
-      body.append(card);
-    }
-
-    const sr = el('div', 'pcard');
-    sr.append(el('h3', '', '<span>Web search</span>'), el('div', 'help', 'DuckDuckGo (no key) with Bing as backup. Optionally add a free Brave Search API key for steadier results.'));
-    const sp = selectOf([['duckduckgo', 'DuckDuckGo + Bing (no key)'], ['brave', 'Brave Search API (key)']], s.search.provider); sp.id = 'f-search';
-    const bk = el('input'); bk.type = 'password'; bk.id = 'f-brave'; bk.placeholder = s.search.hasBraveKey ? '(unchanged)' : 'Brave API key (optional)';
-    const r3 = el('div', 'row'); r3.append(field('Search provider', sp), field('Brave key', bk)); sr.append(r3);
-    body.append(sr);
-
-    const lim = el('div', 'row');
-    const ms = el('input'); ms.type = 'number'; ms.id = 'f-steps'; ms.value = s.maxSteps;
-    const hl = selectOf([['true', 'Hidden (headless)'], ['false', 'Visible window']], String(s.browserHeadless)); hl.id = 'f-headless';
-    lim.append(field('Max tool steps per request', ms), field('Browser window', hl));
-    body.append(lim);
-
-    $('#settings-msg').textContent = '';
-    hydrateIcons($('#settings'));
-    $('#settings').showModal();
+    ({ general: settingsGeneral, models: settingsModels, capabilities: settingsCapabilities, shortcuts: settingsShortcuts, about: settingsAbout })[state.section](body);
   }
 
-  async function saveSettings() {
-    const patch = { providers: {}, search: {}, ui: {} };
-    patch.active = $('#f-active').value;
-    patch.approval = $('#f-approval').value;
-    patch.fallback = $$('.fb').filter((c) => c.checked).map((c) => c.value);
-    patch.maxSteps = Number($('#f-steps').value);
-    patch.browserHeadless = $('#f-headless').value === 'true';
-    patch.search.provider = $('#f-search').value;
-    patch.search.braveKey = $('#f-brave').value;
-    patch.ui = { theme: $('#f-theme').value, font: $('#f-font').value, monoFont: $('#f-mono').value };
-    for (const card of $$('.pcard[data-pid]')) {
-      patch.providers[card.dataset.pid] = { baseUrl: $('.p-url', card).value, model: $('.p-model', card).value, apiKey: $('.p-key', card).value, toolMode: $('.p-mode', card).value };
+  const section = (title, hint) => { const s = el('section'); s.append(el('h2', '', esc(title))); if (hint) s.append(el('p', 'hint', esc(hint))); return s; };
+  function settingRow(title, about, control, full) {
+    const r = el('div', 'setting' + (full ? ' setting-full' : ''));
+    const t = el('div'); t.append(el('b', '', esc(title))); if (about) t.append(el('p', '', esc(about)));
+    r.append(t);
+    if (control) { const c = el('div', 'stack-sm'); [].concat(control).forEach((x) => c.append(x)); r.append(c); }
+    return r;
+  }
+  function segmented(label, options, value, onChange) {
+    const g = el('div', 'segmented'); g.setAttribute('role', 'radiogroup'); g.setAttribute('aria-label', label);
+    for (const [v, t] of options) {
+      const b = el('button', '', esc(t)); b.type = 'button'; b.setAttribute('role', 'radio'); b.setAttribute('aria-checked', String(v === value));
+      b.addEventListener('click', () => { $$('button', g).forEach((x) => x.setAttribute('aria-checked', String(x === b))); onChange(v); });
+      g.append(b);
     }
-    await api('/settings', { method: 'PUT', body: patch });
-    await loadSettings();
-    $('#settings-msg').textContent = 'Saved.';
-    setTimeout(() => $('#settings').close(), 500);
+    return g;
+  }
+  function toggleRow(title, about, checked, onChange) {
+    const r = el('div', 'toggle-row');
+    const t = el('div'); t.append(el('b', '', esc(title))); if (about) t.append(el('p', '', esc(about)));
+    const sw = el('button', 'switch', '<span></span>'); sw.type = 'button'; sw.setAttribute('role', 'switch'); sw.setAttribute('aria-checked', String(checked)); sw.setAttribute('aria-label', title);
+    sw.addEventListener('click', () => { const v = sw.getAttribute('aria-checked') !== 'true'; sw.setAttribute('aria-checked', String(v)); onChange(v); });
+    r.append(t, sw);
+    return r;
+  }
+  /** A text field that saves when you leave it. */
+  function textField(label, value, placeholder, onSave, type = 'text') {
+    const i = el('input'); i.type = type; i.value = value || ''; i.placeholder = placeholder || ''; i.setAttribute('aria-label', label); i.spellcheck = false; i.autocomplete = 'off';
+    i.addEventListener('change', () => { if (i.value.trim() !== (value || '')) { value = i.value.trim(); onSave(value); } });
+    return i;
+  }
+  /** A key the page can set but never read back. */
+  function keyField(label, saved, onSave, onRemove) {
+    const wrap = [];
+    const i = el('input'); i.type = 'password'; i.autocomplete = 'off'; i.setAttribute('aria-label', label);
+    i.placeholder = saved ? 'Saved. Paste a new key to replace it' : 'Paste your key';
+    const row = el('div', 'row');
+    const save = el('button', 'btn', 'Save key'); save.type = 'button'; save.disabled = true;
+    i.addEventListener('input', () => { save.disabled = !i.value.trim(); });
+    save.addEventListener('click', () => { onSave(i.value.trim()); i.value = ''; save.disabled = true; });
+    row.append(save);
+    if (saved && onRemove) { const rm = el('button', 'btn btn-quiet', 'Remove'); rm.type = 'button'; rm.addEventListener('click', onRemove); row.append(rm); }
+    wrap.push(i, row);
+    return wrap;
+  }
+
+  function settingsGeneral(body) {
+    const ui = state.settings.ui;
+    const look = section('Appearance');
+    const themes = el('div', 'themes'); themes.setAttribute('role', 'radiogroup'); themes.setAttribute('aria-label', 'Color mode');
+    for (const [v, label] of [['light', 'Light'], ['dark', 'Dark'], ['system', 'Match system']]) {
+      const b = el('button', 'theme-opt'); b.type = 'button'; b.setAttribute('role', 'radio'); b.setAttribute('aria-checked', String(ui.theme === v));
+      const sw = el('span', 'theme-swatch sw-' + v); if (v !== 'system') sw.append(el('i'), el('em', '', '<span></span><span></span><span></span>'));
+      b.append(sw, document.createTextNode(label));
+      b.addEventListener('click', () => { $$('.theme-opt', themes).forEach((x) => x.setAttribute('aria-checked', String(x === b))); patchSettings({ ui: { theme: v } }); });
+      themes.append(b);
+    }
+    look.append(settingRow('Color mode', null, themes, true));
+    look.append(settingRow('Chat font', 'The font for messages.', segmented('Chat font', [['sans', 'Default'], ['serif', 'Serif'], ['system', 'System'], ['mono', 'Mono']], ui.chatFont || 'sans', (v) => patchSettings({ ui: { chatFont: v } }))));
+    look.append(settingRow('Interface font', 'Leave empty for IBM Plex Sans. To use another, type its name as your font list shows it.', textField('Interface font', ui.font, 'IBM Plex Sans', (v) => patchSettings({ ui: { font: v } }))));
+    look.append(settingRow('Code font', 'For terminals, files and code.', textField('Code font', ui.monoFont, 'IBM Plex Mono', (v) => patchSettings({ ui: { monoFont: v } }))));
+    look.append(toggleRow('Reduce motion', 'Turns off springs and other movement in Freehand.', !!ui.reduceMotion, (v) => patchSettings({ ui: { reduceMotion: v } })));
+    const typing = section('Typing');
+    const hint = el('p', 'hint', ui.enterSends === 'ctrl' ? 'Enter starts a new line.' : 'Shift Enter starts a new line.');
+    typing.append(settingRow('Send messages with', null, [segmented('Send messages with', [['enter', 'Enter'], ['ctrl', 'Ctrl Enter']], ui.enterSends || 'enter', (v) => { hint.textContent = v === 'ctrl' ? 'Enter starts a new line.' : 'Shift Enter starts a new line.'; patchSettings({ ui: { enterSends: v } }); }), hint]));
+    body.append(look, typing);
+  }
+
+  function settingsModels(body) {
+    const s = state.settings;
+    const ids = Object.keys(s.providers);
+    const top = section('Model', 'Freehand sends every request to the active provider. When it hits a rate limit or can\'t connect, it tries the fallbacks in order.');
+    const active = el('select'); active.setAttribute('aria-label', 'Active provider');
+    for (const id of ids) { const o = el('option', '', esc(state.presets[id].label)); o.value = id; active.append(o); }
+    active.value = s.active;
+    active.addEventListener('change', () => patchSettings({ active: active.value }, `Using ${providerName(active.value)}`).then(renderSettings));
+    top.append(settingRow('Active provider', null, active));
+    const fb = el('div', 'stack-sm');
+    for (const id of ids.filter((x) => x !== s.active)) {
+      fb.append(toggleRow(providerName(id), s.providers[id].model || 'No model set', s.fallback.includes(id), (v) => {
+        const next = state.settings.fallback.filter((x) => x !== id);
+        if (v) next.push(id);
+        patchSettings({ fallback: next });
+      }));
+    }
+    top.append(settingRow('Fallbacks', 'Used only when the active provider fails.', null, true), fb);
+    body.append(top);
+
+    const list = section('Providers', 'Ollama runs models on this computer and nothing leaves it. The others send your task and Freehand\'s tool results to that company. Their free tiers have rate limits.');
+    for (const id of ids) {
+      const p = s.providers[id], pre = state.presets[id];
+      const d = el('details', 'provider');
+      if (id === s.active) d.open = true;
+      const sum = el('summary');
+      const g = el('span', 'grow'); g.append(el('b', '', esc(pre.label)), el('small', '', esc(p.model || 'No model set')));
+      const tag = el('span', 'tag');
+      if (id === s.active) { tag.dataset.tone = 'ok'; tag.append(el('span', 'dot'), document.createTextNode('Active')); }
+      else if (pre.needsKey && !p.hasKey) tag.textContent = 'Needs a key';
+      else if (p.hasKey) tag.textContent = 'Key saved';
+      sum.append(ic(id === 'ollama' ? 'cpu' : 'globe'), g, tag);
+      const b = el('div', 'provider-body');
+      b.append(el('p', 'hint', esc(pre.help)));
+      b.append(settingRow('Address', null, textField('Address', p.baseUrl, pre.baseUrl || 'https://example.com/v1', (v) => patchSettings({ providers: { [id]: { baseUrl: v } } }))));
+      const model = textField('Model', p.model, pre.model || 'model name', (v) => patchSettings({ providers: { [id]: { model: v } } }));
+      const dl = el('datalist'); dl.id = 'models-' + id; model.setAttribute('list', dl.id);
+      const listBtn = el('button', 'btn', 'List models'); listBtn.type = 'button';
+      const listHint = el('p', 'hint');
+      listBtn.addEventListener('click', async () => {
+        listBtn.disabled = true;
+        const r = await api('/models?provider=' + id).catch((e) => ({ models: [], error: e.message }));
+        dl.innerHTML = r.models.map((m) => `<option value="${esc(m)}">`).join('');
+        listHint.textContent = r.error ? r.error : `${r.models.length} models. Click the box to pick one.`;
+        listBtn.disabled = false;
+      });
+      b.append(settingRow('Model', null, [model, dl, listBtn, listHint]));
+      if (id !== 'ollama' || p.hasKey) {
+        b.append(settingRow('API key', pre.needsKey ? 'Required.' : 'Optional.', keyField(`${pre.label} API key`, p.hasKey,
+          (v) => patchSettings({ providers: { [id]: { apiKey: v } } }, 'Key saved').then(renderSettings),
+          () => patchSettings({ providers: { [id]: { clearKey: true } } }, 'Key removed').then(renderSettings))));
+      }
+      const mode = el('select'); mode.setAttribute('aria-label', 'Tool calling');
+      for (const [v, t] of [['auto', 'Automatic'], ['native', 'Native tool calls'], ['json', 'JSON replies (small local models)']]) { const o = el('option', '', t); o.value = v; mode.append(o); }
+      mode.value = p.toolMode;
+      mode.addEventListener('change', () => patchSettings({ providers: { [id]: { toolMode: mode.value } } }));
+      b.append(settingRow('Tool calling', 'How the model asks for tools. Automatic picks per model.', mode));
+      d.append(sum, b);
+      list.append(d);
+    }
+    body.append(list);
+  }
+
+  function settingsCapabilities(body) {
+    const s = state.settings;
+    const eff = section('Effort', 'How hard Freehand works on each task. Higher effort makes longer plans, checks more sources and reviews its work, and takes longer. You can also change it from the box you type in.');
+    const effHint = el('p', 'hint', (EFFORTS.find((e) => e[0] === s.effort) || EFFORTS[2])[2] + '.');
+    eff.append(settingRow('Effort', null, [segmented('Effort', EFFORTS.map(([v, l]) => [v, l]), s.effort, (v) => { effHint.textContent = EFFORTS.find((e) => e[0] === v)[2] + '.'; patchSettings({ effort: v }, `Effort: ${effortLabel(v)}`); }), effHint]));
+    body.append(eff);
+    const safety = section('Safety', 'Freehand runs shell commands and Python on this computer.');
+    safety.append(settingRow('Shell and Python commands', null, [
+      segmented('Shell and Python commands', [['ask', 'Ask me first'], ['auto', 'Run without asking']], s.approval, (v) => patchSettings({ approval: v }).then(renderSettings)),
+      el('p', 'hint', s.approval === 'ask' ? 'Each command waits for you to press Allow.' : 'Commands run as soon as the model writes them, including ones a web page talked it into.'),
+    ]));
+    const steps = el('input'); steps.type = 'number'; steps.min = '5'; steps.max = '200'; steps.value = s.maxSteps; steps.setAttribute('aria-label', 'Most tool steps per request');
+    steps.addEventListener('change', () => patchSettings({ maxSteps: Number(steps.value) }));
+    safety.append(settingRow('Most tool steps per request', 'Stops a task that loops. From 5 to 200, at High effort. Low uses 40% of it, Medium 70%, Max 250%.', steps));
+
+    const web = section('Web search', 'For the web_search tool. Search words go to the provider you pick.');
+    let braveRow;
+    web.append(settingRow('Provider', null, segmented('Search provider', [['duckduckgo', 'DuckDuckGo'], ['brave', 'Brave']], s.search.provider, (v) => { braveRow.hidden = v !== 'brave'; patchSettings({ search: { provider: v } }); })));
+    braveRow = settingRow('Brave Search key', 'Free tier at api.search.brave.com. Gives steadier results than DuckDuckGo.', keyField('Brave Search key', s.search.hasBraveKey, (v) => patchSettings({ search: { braveKey: v } }, 'Key saved').then(renderSettings)));
+    braveRow.hidden = s.search.provider !== 'brave';
+    web.append(braveRow);
+
+    const browser = section('Browser');
+    browser.append(toggleRow('Show the browser window', 'Off keeps it hidden. Freehand\'s computer panel still shows screenshots.', !s.browserHeadless, (v) => patchSettings({ browserHeadless: !v })));
+    body.append(safety, web, browser);
+  }
+
+  const SHORTCUTS = [
+    ['Search tasks and actions', ['Ctrl', 'K']],
+    ['New task', ['Ctrl', 'N']],
+    ['Settings', ['Ctrl', ',']],
+    ['Collapse the sidebar', ['Ctrl', 'B']],
+    ['Show Freehand\'s computer', ['Ctrl', 'Shift', 'C']],
+    ['New line in a message', ['Shift', 'Enter']],
+    ['Close a menu or Settings', ['Esc']],
+  ];
+  function settingsShortcuts(body) {
+    const s = section('Keyboard shortcuts');
+    const g = el('div', 'shortcut-list');
+    for (const [label, keys] of SHORTCUTS) {
+      const k = el('span'); keys.forEach((x) => k.append(el('kbd', 'kbd', esc(x))));
+      g.append(el('span', '', esc(label)), k);
+    }
+    s.append(g);
+    body.append(s);
+  }
+
+  function settingsAbout(body) {
+    const info = state.info || {};
+    const s = section('Freehand');
+    s.append(settingRow('Version', null, el('p', 'mono', esc(info.version || ''))));
+    s.append(settingRow('Updates', 'The desktop app checks GitHub every 6 hours, downloads in the background and asks before restarting.'));
+    const folder = el('p', 'code-block', esc(info.dataDir || ''));
+    const btns = [folder];
+    if (shell && shell.openData) { const b = el('button', 'btn'); b.type = 'button'; b.append(ic('folder-open'), document.createTextNode('Open folder')); b.addEventListener('click', () => shell.openData()); btns.push(b); }
+    s.append(settingRow('Your data', 'Settings, API keys and every task\'s files. Keys sit in settings.json, readable only by your account.', btns));
+    body.append(s);
+    if (shell && shell.uninstall) {
+      const u = section('Uninstall');
+      const b = el('button', 'btn btn-danger'); b.type = 'button'; b.append(ic('trash'), document.createTextNode('Uninstall Freehand'));
+      b.addEventListener('click', () => shell.uninstall());
+      u.append(settingRow('Remove Freehand', 'Deletes the app, its menu entry, and all your tasks and settings. Ollama and its models stay.', b));
+      body.append(u);
+    }
+    const l = section('Licenses');
+    l.append(el('p', 'hint', 'Fonts: IBM Plex and Fraunces, SIL Open Font License. Icons: Phosphor, MIT.'));
+    body.append(l);
+  }
+
+  /* ---------- Command menu ---------- */
+  let cmdItems = [], cmdSel = 0;
+  function openCmdk() {
+    closeMenus();
+    $('#cmdk').hidden = false;
+    const i = $('#cmdk-input'); i.value = ''; renderCmdk(); i.focus();
+  }
+  function closeCmdk() { $('#cmdk').hidden = true; }
+  function renderCmdk() {
+    const q = $('#cmdk-input').value.trim().toLowerCase();
+    const actions = [
+      ['plus', 'New task', 'Ctrl N', newTask],
+      ['gear', 'Settings', 'Ctrl ,', () => openSettings('general')],
+      ['cpu', 'Change model', '', () => openSettings('models')],
+      ...EFFORTS.map(([v, l]) => ['gauge', `Effort: ${l}`, '', () => patchSettings({ effort: v }, `Effort: ${l}`)]),
+      ['desktop', 'Show Freehand\'s computer', 'Ctrl Shift C', () => { if (state.current) { if (state.view !== 'task') openTask(state.current); setPanel(true); renderPanel(); } }],
+      [document.documentElement.dataset.theme === 'dark' ? 'sun' : 'moon', 'Switch light and dark', '', toggleTheme],
+      ['keyboard', 'Keyboard shortcuts', '', () => openSettings('shortcuts')],
+    ].filter(([, l]) => !q || l.toLowerCase().includes(q));
+    const tasks = visibleTasks().filter((t) => !q || t.title.toLowerCase().includes(q)).slice(0, 30);
+    const list = $('#cmdk-list');
+    list.innerHTML = '';
+    cmdItems = [];
+    const push = (node, run) => { node.setAttribute('role', 'option'); cmdItems.push({ node, run }); list.append(node); };
+    if (actions.length) list.append(el('div', 'menu-label', 'Actions'));
+    for (const [i, l, k, run] of actions) push(menuItem(i, l, '', () => { closeCmdk(); run(); }, { keys: k || undefined }), run);
+    if (tasks.length) list.append(el('div', 'menu-label', 'Tasks'));
+    for (const t of tasks) push(menuItem('chat-circle-text', t.title, ago(t.updated), () => { closeCmdk(); openTask(t.id); }), () => openTask(t.id));
+    if (!cmdItems.length) list.append(el('div', 'cmdk-empty', 'Nothing matches.'));
+    cmdSel = 0; markCmd();
+  }
+  function markCmd() { cmdItems.forEach((c, i) => { if (i === cmdSel) { c.node.dataset.active = ''; c.node.scrollIntoView({ block: 'nearest' }); } else delete c.node.dataset.active; }); }
+
+  function toggleTheme() {
+    const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    patchSettings({ ui: { theme: next } }, null);
   }
 
   /* ---------- Wire up ---------- */
@@ -555,10 +858,29 @@
     { icon: 'file-code', label: 'Build a page', text: 'Build a single-page HTML site for [idea] and save it as index.html' },
   ];
 
+  function fillProfileMenu(menu) {
+    const theme = state.settings ? state.settings.ui.theme : 'system';
+    menu.append(menuItem('gear', 'Settings', '', () => openSettings('general'), { keys: 'Ctrl ,' }));
+    menu.append(menuItem('keyboard', 'Keyboard shortcuts', '', () => openSettings('shortcuts')));
+    menu.append(el('div', 'menu-sep'), el('div', 'menu-label', 'Color mode'));
+    for (const [v, l, i] of [['light', 'Light', 'sun'], ['dark', 'Dark', 'moon'], ['system', 'Match system', 'desktop']]) {
+      menu.append(menuItem(i, l, '', () => patchSettings({ ui: { theme: v } }, null), { checked: theme === v }));
+    }
+    menu.append(el('div', 'menu-sep'));
+    menu.append(menuItem('info', 'About Freehand', '', () => openSettings('about')));
+  }
+  function fillTitleMenu(menu) {
+    const t = state.tasks.find((x) => x.id === state.current);
+    menu.append(menuItem('desktop', 'Show Freehand\'s computer', '', () => { setPanel(true); renderPanel(); }, { keys: 'Ctrl Shift C' }));
+    menu.append(menuItem('folder-open', 'Show files', '', () => { setPanel(true); state.panelTab = 'files'; renderPanel(); }));
+    if (t) menu.append(el('div', 'menu-sep'), menuItem('trash', 'Delete task', '', () => deleteTask(t), { danger: true }));
+  }
+
   function init() {
+    $('#composer-home-slot').append(document.importNode($('#composer-tpl').content, true));
     hydrateIcons();
     for (const s of STARTERS) {
-      const b = el('button', 'home-chip'); b.type = 'button';
+      const b = el('button', 'chip'); b.type = 'button';
       b.append(ic(s.icon), document.createTextNode(s.label));
       b.addEventListener('click', () => {
         const i = $('#input'); i.value = s.text; autosize(); i.focus();
@@ -567,28 +889,27 @@
       });
       $('#home-chips').append(b);
     }
-    $('#new-task').addEventListener('click', () => { newTask(); if (innerWidth < 1000) setSidebar(false); });
-    $('#open-settings').addEventListener('click', openSettings);
-    $('#model-chip').addEventListener('click', (e) => { e.stopPropagation(); if ($('#model-pop').hidden) openPop(); else closePop(); });
-    document.addEventListener('click', (e) => { if (!$('#model-pop').hidden && !e.target.closest('#model-pop')) closePop(); });
-    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closePop(); });
-    $('#close-sidebar').addEventListener('click', () => setSidebar(false));
-    $('#open-sidebar').addEventListener('click', () => setSidebar(true));
-    $('#task-search').addEventListener('input', renderTasks);
-    setSidebar(innerWidth >= 1000);
-    $('#save-settings').addEventListener('click', () => saveSettings().catch((e) => { $('#settings-msg').textContent = e.message; }));
-    $('#settings').addEventListener('close', () => { if (state.settings) applyAppearance(state.settings.ui); });
-    $('#toggle-theme').addEventListener('click', async () => {
-      const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
-      applyAppearance({ ...state.settings.ui, theme: next });
-      state.settings.ui.theme = next;
-      api('/settings', { method: 'PUT', body: { ui: { theme: next } } }).catch(() => {});
-    });
+    $('#new-task').addEventListener('click', newTask);
+    $('#open-search').addEventListener('click', openCmdk);
+    $('#toggle-sidebar').addEventListener('click', () => setSidebar(!$('#app').classList.contains('collapsed')));
+    $('#profile-btn').addEventListener('click', (e) => { e.stopPropagation(); toggleMenu($('#profile-btn'), $('#profile-menu'), fillProfileMenu); });
+    $('#task-title').addEventListener('click', (e) => { e.stopPropagation(); toggleMenu($('#task-title'), $('#title-menu'), fillTitleMenu); });
+    $('#model-chip').addEventListener('click', (e) => { e.stopPropagation(); if (state.settings) toggleMenu($('#model-chip'), $('#model-pop'), fillModelMenu); });
+    $('#effort-chip').addEventListener('click', (e) => { e.stopPropagation(); if (state.settings) toggleMenu($('#effort-chip'), $('#model-pop'), fillEffortMenu); });
+    $('#safety-chip').addEventListener('click', (e) => { e.stopPropagation(); if (state.settings) toggleMenu($('#safety-chip'), $('#model-pop'), fillSafetyMenu); });
+    document.addEventListener('click', (e) => { if (openMenu && !e.target.closest('.menu')) closeMenus(); });
+    $('#settings-close').addEventListener('click', closeSettings);
+
     $('#composer').addEventListener('submit', (e) => { e.preventDefault(); submit($('#input').value); });
-    $('#input').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); submit($('#input').value); } });
+    $('#input').addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' || e.isComposing) return;
+      const ctrlMode = state.settings && state.settings.ui.enterSends === 'ctrl';
+      if (ctrlMode ? e.ctrlKey || e.metaKey : !e.shiftKey) { e.preventDefault(); submit($('#input').value); }
+    });
     $('#input').addEventListener('input', autosize);
     $('#stop').addEventListener('click', () => state.current && api(`/tasks/${state.current}/stop`, { method: 'POST' }));
-    document.addEventListener('keydown', (e) => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); newTask(); } });
+    $('#thread').addEventListener('scroll', () => { $('#jump').hidden = nearBottom(); });
+    $('#jump').addEventListener('click', () => { thread().scrollTop = thread().scrollHeight; });
 
     $('#toggle-computer').addEventListener('click', () => { setPanel(!state.panelOpen); renderPanel(); });
     $('#cp-close').addEventListener('click', () => setPanel(false));
@@ -603,11 +924,37 @@
       $('#progress-toggle').setAttribute('aria-expanded', String(!list.hidden));
     });
 
+    $('#cmdk').addEventListener('click', (e) => { if (e.target.id === 'cmdk') closeCmdk(); });
+    $('#cmdk-input').addEventListener('input', renderCmdk);
+    $('#cmdk-input').addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowDown') { e.preventDefault(); cmdSel = Math.min(cmdItems.length - 1, cmdSel + 1); markCmd(); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); cmdSel = Math.max(0, cmdSel - 1); markCmd(); }
+      else if (e.key === 'Enter' && cmdItems[cmdSel]) { e.preventDefault(); cmdItems[cmdSel].node.click(); }
+    });
+
+    document.addEventListener('keydown', (e) => {
+      const mod = e.ctrlKey || e.metaKey, k = e.key.toLowerCase();
+      if (e.key === 'Escape') {
+        if (!$('#cmdk').hidden) return closeCmdk();
+        if (openMenu) return closeMenus();
+        if (state.view === 'settings') return closeSettings();
+        return;
+      }
+      if (!mod) return;
+      if (k === 'k') { e.preventDefault(); if ($('#cmdk').hidden) openCmdk(); else closeCmdk(); }
+      else if (k === 'n') { e.preventDefault(); closeCmdk(); newTask(); }
+      else if (k === ',') { e.preventDefault(); openSettings(); }
+      else if (k === 'b') { e.preventDefault(); setSidebar(!$('#app').classList.contains('collapsed')); }
+      else if (k === 'c' && e.shiftKey && state.current) { e.preventDefault(); if (state.view !== 'task') openTask(state.current); setPanel(!state.panelOpen); renderPanel(); }
+    });
+
+    setSidebar(store.get('collapsed') === '1');
     loadSettings().catch(() => {});
     loadTasks().catch(() => {});
-    setHome(true);
+    showView('home');
     setStatus('idle');
     renderPanel();
+    $('#input').focus();
   }
   init();
 })();

@@ -93,6 +93,24 @@ test('agent: simple chat answers directly without tools', async () => {
   assert.ok(!events.some((e) => e.type === 'tool'));
 });
 
+test('effort: changes the plan size, the step budget and the instructions', async () => {
+  const { applyPatch } = require('../src/core/config');
+  assert.equal(applyPatch(defaultSettings(), { effort: 'max' }).effort, 'max');
+  assert.equal(applyPatch(defaultSettings(), { effort: 'turbo' }).effort, 'high');
+  const seen = [];
+  const mock = await mockProvider((body) => {
+    seen.push(body.messages[0].content);
+    if (!body.tools) return { message: text('{"title":"Loop","steps":["Keep listing files"]}') };
+    return { message: toolCall('file_list', { path: '.', n: seen.length }) };
+  });
+  const { result, events } = await runAgent(settingsFor(mock.url, { effort: 'low', maxSteps: 20 }), 'list files forever');
+  mock.close();
+  assert.match(seen[0], /1-3 concrete steps/);
+  assert.match(seen[1], /Effort: LOW/);
+  assert.equal(result.status, 'stopped');
+  assert.equal(events.filter((e) => e.type === 'tool').length, 8, 'low effort gets 40% of 20 steps');
+});
+
 test('agent: falls back to JSON tool mode when the model rejects native tools', async () => {
   const mock = await mockProvider((body) => {
     if (!body.tools && body.messages[0].content.includes('planning module')) return { message: text('<think>ok</think>{"title":"T","steps":["do it"]}') };

@@ -3,7 +3,8 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { loadSettings, saveSettings, publicSettings, applyPatch, PROVIDER_PRESETS } = require('../core/config');
+const { homeDir, loadSettings, saveSettings, publicSettings, applyPatch, PROVIDER_PRESETS } = require('../core/config');
+const { version } = require('../../package.json');
 const { listModels } = require('../core/providers');
 const { listDir } = require('../tools');
 const { safePath } = require('../core/util');
@@ -71,6 +72,7 @@ function startServer({ port = 0, host = '127.0.0.1', token = crypto.randomBytes(
       }
       return send(res, 200, { settings: publicSettings(loadSettings()), presets: PROVIDER_PRESETS, platform: process.platform });
     }
+    if (parts[0] === 'info') return send(res, 200, { version, dataDir: homeDir(), platform: process.platform, desktop: !!process.versions.electron });
     if (parts[0] === 'models') {
       try { return send(res, 200, { models: await listModels(loadSettings(), url.searchParams.get('provider') || 'ollama') }); }
       catch (e) { return send(res, 200, { models: [], error: e.message }); }

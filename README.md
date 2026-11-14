@@ -4,7 +4,8 @@ A Manus-style autonomous agent that runs on **free models**. Give it a goal; it 
 
 - **Models:** Ollama (local, unlimited) and free cloud tiers (OpenRouter `:free` models, Groq, Google Gemini). Switch in Settings; set fallback providers so a rate limit on one free tier moves the task to the next.
 - **Tools:** web search, page fetch, Playwright browser (click/type/scroll/screenshot), file read/write/edit, shell, Python, ask-the-user.
-- **UI:** chat timeline, live plan checklist, screen pane (browser screenshots + command output), workspace file browser, per-command approval.
+- **UI:** laid out like Hatch and Claude's desktop app: a sidebar of recent tasks, a home screen with one composer box, the agent's work in a centered thread, a live plan checklist, the Computer panel (browser screenshots, command output, files), and full-page Settings with sections. Ctrl+K searches tasks and actions; deleting a task shows an Undo toast.
+- **Effort:** Low, Medium, High or Max, like Claude's effort setting. Pick it in the composer or in Settings > Capabilities. Higher effort makes longer plans, gives the agent more tool steps (Low 40% of your step limit, Medium 70%, High 100%, Max 250%), and tells it to check more sources and review its work. Lower effort finishes faster.
 - **Platforms:** Windows and Linux (Bazzite/Fedora/Ubuntu/Pop!_OS). Electron app + plain Node core.
 
 ## Run it
@@ -47,7 +48,7 @@ Manus runs frontier models. Free and small models are noticeably weaker: expect 
 
 This agent runs commands **on your real machine**, not in a VM.
 
-- **Shell and Python ask for your approval by default** (Settings > "Shell and Python safety"). Only switch to automatic if you trust the model and task.
+- **Shell and Python ask for your approval by default** (the shield button in the composer, or Settings > Capabilities > Safety). Only switch to "Run without asking" if you trust the model and task. A web page can talk a small model into running a harmful command.
 - File tools are confined to the task's workspace folder (symlink escapes are blocked). Shell/Python start in that folder but are **not** sandboxed: an approved command can touch anything your user can.
 - The local server binds to `127.0.0.1`, requires a per-launch secret cookie, and rejects foreign `Host` headers, so websites and other apps cannot drive the agent.
 - API keys are stored in plain text in `settings.json` (owner-only permissions on Linux; on Windows it sits in your user profile). Files the agent writes are served as plain text, never rendered as HTML.
@@ -71,13 +72,13 @@ electron/main.js     window + backend launcher
 src/core/            config, provider adapters (OpenAI-compatible), agent loop
 src/tools/           search/fetch, browser, files, shell/python
 src/server/          local HTTP + SSE API, task store
-ui/                  vanilla JS UI (no build step), uses your system font, Phosphor icons
+ui/                  vanilla JS UI (no build step), bundled IBM Plex and Fraunces fonts, Phosphor icons
 test/                npm test (mock-model suite), browser.test.js, ui-smoke.js
 ```
 
 ## Credits
 
-Theme: "Clean Slate" (light + dark) from 21st.dev community themes. Layout follows the Manus pattern (task sidebar, centered composer, task-progress bar, live "Computer" panel). Icons: Phosphor. Font: your OS UI font by default; type any installed font name in Settings > Appearance.
+Layout and styles follow Hatch. Fonts: IBM Plex Sans, IBM Plex Mono and Fraunces (SIL Open Font License), bundled so no font is fetched from the internet; type any installed font name in Settings > General to use your own. Icons: Phosphor (MIT).
 
 
 ## Install like a normal app (Start menu + auto-update)
@@ -104,4 +105,4 @@ If you use a different GitHub name or repo name, change `build.publish` and `rep
 Electron is pinned to 45.x because older versions fail to install on Node 24.16+/26 and npm 11 blocks their postinstall script.
 
 ## Using your own model app
-Point **Custom (OpenAI-compatible)** at your app's server address (Settings > Provider settings), or let it serve the model through Ollama and pick Ollama.
+Point **Custom (OpenAI-compatible)** at your app's server address (Settings > Models), or let it serve the model through Ollama and pick Ollama.
