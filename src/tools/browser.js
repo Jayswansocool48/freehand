@@ -138,7 +138,8 @@ class BrowserSession {
   /**
    * Opens a game or page the agent built, plays it with simple inputs and reports what went wrong:
    * uncaught errors, console errors, files that failed to load, and a screenshot of the result.
-   * actions: "click", "click X Y", "key KEY [ms]", "type TEXT", "mouse X Y", "wait MS".
+   * actions: "click", "click X Y", "click #id", "click Some text", "key KEY [ms]", "tap KEY [times] [gap ms]", "type TEXT", "mouse X Y", "wait MS".
+   * Each input is followed by a note on what changed on screen, and window.__game (if the game sets it) is reported.
    */
   async playTest({ url, actions = [], seconds = 3 }) {
     await this.launch();
@@ -160,39 +161,87 @@ class BrowserSession {
       await this.settle();
       await page.waitForTimeout(800);
       const vp = page.viewportSize() || { width: 1280, height: 800 };
+      const timeline = [];
+      let before = await look(page);
+      const start = before;
+      const seen = [before];
       for (const raw of (Array.isArray(actions) ? actions : []).slice(0, 40)) {
         const [cmd, ...rest] = String(raw).trim().split(/\s+/);
         const nums = rest.map(Number);
         try {
           switch ((cmd || '').toLowerCase()) {
-            case 'click': await page.mouse.click(Number.isFinite(nums[0]) ? nums[0] : vp.width / 2, Number.isFinite(nums[1]) ? nums[1] : vp.height / 2); break;
+            case 'click':
+              if (rest.length && !Number.isFinite(nums[0])) {
+                // "click #start" (CSS selector) or "click Start Game" (visible text)
+                const target = rest.join(' ');
+                const loc = /^[#.\[]/.test(target) ? page.locator(target) : page.getByText(target, { exact: false });
+                try {
+                  await loc.first().click({ timeout: 2500 });
+                } catch (e) {
+                  if (!(await loc.count().catch(() => 0))) throw new Error('no element matches that');
+                  if (!(await loc.first().isVisible().catch(() => false))) throw new Error('that element exists but is hidden');
+                  throw new Error('that element is on the page but something covers it (often the canvas or an overlay), so a player cannot click it either');
+                }
+              } else await page.mouse.click(Number.isFinite(nums[0]) ? nums[0] : vp.width / 2, Number.isFinite(nums[1]) ? nums[1] : vp.height / 2);
+              break;
             case 'mouse': await page.mouse.move(nums[0] || 0, nums[1] || 0, { steps: 5 }); break;
             case 'key': case 'press': case 'hold': {
               const ms = Math.min(5000, Number(rest[1]) || 120);
               await page.keyboard.down(rest[0] || 'Space'); await page.waitForTimeout(ms); await page.keyboard.up(rest[0] || 'Space');
               break;
             }
+            case 'tap': { // "tap Space 8 350": press a key 8 times, 350 ms apart, fast enough for reflex games
+              const times = Math.max(1, Math.min(40, Number(rest[1]) || 5));
+              const gap = Math.max(60, Math.min(3000, Number(rest[2]) || 350));
+              for (let i = 0; i < times; i++) { await page.keyboard.press(rest[0] || 'Space'); if (i < times - 1) await page.waitForTimeout(gap); }
+              break;
+            }
             case 'type': await page.keyboard.type(rest.join(' '), { delay: 30 }); break;
             case 'wait': await page.waitForTimeout(Math.min(10000, nums[0] || 500)); break;
-            default: throw new Error('unknown action; use click, mouse, key, type or wait');
+            default: throw new Error('unknown action; use click, mouse, key, tap, type or wait');
           }
           done.push(String(raw));
-        } catch (e) { done.push(`${raw} -> FAILED: ${String(e.message).split('\n')[0]}`); }
+          await page.waitForTimeout(250);
+          const after = await look(page);
+          seen.push(after);
+          timeline.push(`- after "${raw}": ${describeChange(before, after)}`);
+          before = after;
+        } catch (e) {
+          const msg = String(e.message).split('\n')[0];
+          done.push(`${raw} -> FAILED: ${msg}`);
+          timeline.push(`- "${raw}" FAILED: ${msg}`);
+        }
       }
       await page.waitForTimeout(Math.min(15000, Math.max(0, Number(seconds) || 0) * 1000));
       const shot = await this.shot();
+      const end = await look(page);
+      seen.push(end);
+      await page.waitForTimeout(400);
+      const later = await look(page);
+      const moving = later.pic !== end.pic;
       const info = await page.evaluate(() => ({
         title: document.title,
         canvases: [...document.querySelectorAll('canvas')].map((c) => `${c.width}x${c.height}`),
         text: (document.body ? document.body.innerText : '').trim().replace(/\n{2,}/g, '\n').slice(0, 1200),
       }));
+      // Things that look wrong even when nothing threw an error.
+      const watch = [];
+      const inputs = done.filter((d) => !/FAILED/.test(d) && !/^wait/i.test(d));
+      if (inputs.length && start.pic === end.pic && !moving) watch.push('Nothing on screen changed after your inputs. The game probably never started (wrong start button or no input handler), or it is frozen. Fix that before anything else.');
+      if (!moving && later.game && later.game.state === 'play' && end.game && later.game.time === end.game.time) watch.push('The game says it is playing but its clock and screen stopped. Is the game loop still running (requestAnimationFrame called every frame)?');
+      const quick = seen.map((l) => l.game).find((gm) => gm && gm.state === 'over' && Number(gm.time) < 1.5);
+      if (quick) watch.push(`A round ended after only ${quick.time} s with score ${quick.score}. If the player did nothing wrong, it dies too fast: check the collision code, starting positions and gravity.`);
+      if (timeline.some((t) => /FAILED/.test(t))) watch.push('Some inputs failed; see the timeline.');
       // Report workspace paths ("./assets/x.glb") instead of long preview URLs.
       const dir = url.slice(0, url.lastIndexOf('/') + 1);
       const uniq = (a) => [...new Set(a.map((x) => x.split(dir).join('./')))];
       return [
         `Played ${url.split(dir).join('./')}`,
-        `Title: ${info.title || '(none)'} · canvases: ${info.canvases.length ? info.canvases.join(', ') : 'none'}`,
+        `Title: ${info.title || '(none)'} · canvases: ${info.canvases.length ? info.canvases.join(', ') : 'none'} · screen ${moving ? 'is moving' : 'is still'}`,
         done.length ? `Inputs: ${done.join(' | ')}` : 'Inputs: none',
+        timeline.length ? `What happened:\n${timeline.join('\n')}` : '',
+        end.game ? `Game state (window.__game): ${JSON.stringify(end.game)}` : '',
+        watch.length ? `WATCH OUT, fix these:\n- ${watch.join('\n- ')}` : '',
         errors.length ? `ERRORS (${errors.length}), fix these:\n${uniq(errors).slice(0, 15).join('\n')}` : 'Errors: none',
         ...hintsFor([...errors, ...failed].join('\n')),
         failed.length ? `FILES THAT FAILED TO LOAD:\n${uniq(failed).slice(0, 15).join('\n')}` : 'Failed loads: none',
@@ -212,6 +261,24 @@ class BrowserSession {
   }
 }
 
+/** What a player would see right now: a fingerprint of the screen, the visible text and the game's own state. */
+async function look(page) {
+  const pic = require('crypto').createHash('md5').update(await page.screenshot({ type: 'jpeg', quality: 40 })).digest('hex');
+  const r = await page.evaluate(() => {
+    let game = null;
+    try { if (window.__game) game = JSON.parse(JSON.stringify(window.__game)); } catch { /* not plain data */ }
+    return { text: (document.body ? document.body.innerText : '').trim().replace(/\s+/g, ' ').slice(0, 300), game };
+  }).catch(() => ({ text: '', game: null }));
+  return { pic, ...r };
+}
+
+function describeChange(a, b) {
+  const parts = [a.pic === b.pic ? 'screen did NOT change' : 'screen changed'];
+  if (a.text !== b.text) parts.push(b.text ? `text now "${b.text.slice(0, 120)}"` : 'all text disappeared');
+  if (b.game) parts.push(`game ${JSON.stringify(b.game).slice(0, 160)}`);
+  return parts.join('; ');
+}
+
 /** Plain-language fixes for the mistakes small models make most in web games. */
 const HINTS = [
   [/THREE is not defined/, 'HOW TO FIX: three.js is loaded as a module, so there is no global THREE. Put the game code in <script type="module"> and start it with: import * as THREE from \'three\';'],
@@ -221,6 +288,11 @@ const HINTS = [
   [/\.(glb|gltf|obj|fbx|png|jpe?g|mp3|wav|ogg)\b[^\n]*(404|ERR_FILE_NOT_FOUND)/i, 'HOW TO FIX: a file the game loads does not exist at that path. Check the name with file_list (paths are relative to the HTML file), or make the model with make_model.'],
   [/Cannot read properties of (null|undefined) \(reading '(addEventListener|getContext|appendChild|textContent|innerHTML|style)'\)/, 'HOW TO FIX: the code looks up an element that is not there yet or has a different id. Check the ids match, and run the code after the element exists (put the script at the end of <body> or use type="module").'],
 ];
+HINTS.push(
+  [/Invalid or unexpected token|Unexpected token|missing \) after|Unexpected end of input/, 'HOW TO FIX: a .js file has a syntax error, so none of it ran. Often a literal \\n was written into the code, or a quote or bracket is unclosed. file_read the file, find the broken line and fix it (file_write the whole file if that is easier).'],
+  [/Identifier '(\w+)' has already been declared/, 'HOW TO FIX: the same const/let name is declared twice in one file. Delete one of the declarations.'],
+  [/\bg\.(pressed|down|overlap|addScore|gameOver|sfx|image|drawImage|burst|shake|rand|clamp) is not a function/, 'HOW TO FIX: the helpers belong to Kit, not g. Write Kit.pressed(...), Kit.down(...), Kit.overlap(...), Kit.addScore(...), Kit.gameOver(), Kit.sfx(...).'],
+);
 function hintsFor(text) { return HINTS.filter(([re]) => re.test(text)).map(([, hint]) => hint); }
 
 /** Chromium builds already in the Playwright cache, newest first, even if they are not the exact revision this Playwright wants. */

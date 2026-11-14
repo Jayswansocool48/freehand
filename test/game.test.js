@@ -262,3 +262,37 @@ test('agent may repeat play_test after changing a file (loop guard resets on edi
   mock.close();
   assert.equal(agent.history.filter((h) => h.role === 'tool' && /exact call several times/.test(h.content)).length, 0);
 });
+
+test('game_template writes a working starter and will not overwrite a game by accident', async () => {
+  const ws = fs.mkdtempSync(path.join(home, 'ws-'));
+  const { ctx, events } = ctxFor(ws);
+  const out = await tool('game_template').run({ template: 'flyer', title: 'Sky <Hop>' }, ctx);
+  assert.match(out, /Wrote index\.html, kit\.js, game\.js/);
+  assert.match(fs.readFileSync(path.join(ws, 'index.html'), 'utf8'), /<title>Sky Hop<\/title>[\s\S]*kit\.js[\s\S]*game\.js/);
+  assert.match(fs.readFileSync(path.join(ws, 'game.js'), 'utf8'), /passed/);
+  assert.ok(events.some((e) => e.type === 'file' && e.path === 'game.js'));
+  await assert.rejects(tool('game_template').run({ template: 'platformer' }, ctx), /already exist[\s\S]*overwrite/);
+  await tool('game_template').run({ template: 'platformer', overwrite: true }, ctx);
+  assert.match(fs.readFileSync(path.join(ws, 'game.js'), 'utf8'), /LEVEL/);
+  await assert.rejects(tool('game_template').run({ template: 'racing' }, ctx), /Unknown template "racing"/);
+
+  const ws3 = fs.mkdtempSync(path.join(home, 'ws-'));
+  await tool('game_template').run({ template: '3d' }, ctxFor(ws3).ctx);
+  assert.ok(fs.existsSync(path.join(ws3, 'assets/player.glb')), 'the 3d template ships the model it loads');
+  assert.match(fs.readFileSync(path.join(ws3, 'index.html'), 'utf8'), /importmap/);
+});
+
+test('make_sprite saves a PNG, makes sprite sheets and reports colours missing from the palette', async () => {
+  const ws = fs.mkdtempSync(path.join(home, 'ws-'));
+  const { ctx } = ctxFor(ws);
+  const out = await tool('make_sprite').run({ path: 'assets/coin', pixels: ['.YY.', 'YXYY', '.YY.'], palette: { Y: 'yellow' }, scale: 2 }, ctx);
+  assert.match(out, /Saved assets\/coin\.png \(8×6 px\)/);
+  assert.match(out, /not in the palette[^\n]*X/);
+  const png = fs.readFileSync(path.join(ws, 'assets/coin.png'));
+  assert.equal(png.toString('hex', 0, 8), '89504e470d0a1a0a');
+  assert.equal(png.readUInt32BE(16), 8);
+  assert.equal(png.readUInt32BE(20), 6);
+  const sheet = await tool('make_sprite').run({ path: 'assets/walk.png', frames: [['AB'], ['BA'], ['AA']], palette: { A: '#f00', B: '#00ff0080' } }, ctx);
+  assert.match(sheet, /24×4 px\)\. Sprite sheet: 3 frames, each 8 px wide/);
+  await assert.rejects(tool('make_sprite').run({ path: 'x.png', pixels: ['A'], palette: { A: 'blurple' } }, ctx), /not a hex color/);
+});

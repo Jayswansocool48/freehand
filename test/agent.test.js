@@ -303,3 +303,43 @@ test('tasks: rewind cuts the chat back to a message and runs it again (edit and 
   assert.throws(() => t.rewind(1, 'x'), /cannot be edited/);
   mock.close();
 });
+
+test('agent: a step that claims a fix without changing any file is sent back', async () => {
+  const mock = await mockProvider((body) => {
+    if (!body.tools) return { message: text('{"title":"Fix game","steps":["[pending] Fix the collision bug"]}') };
+    const n = body.messages.filter((m) => m.role === 'tool').length;
+    return { message: [
+      toolCall('file_list', {}),
+      toolCall('step_done', { summary: 'Fixed the collision detection' }),
+      toolCall('file_write', { path: 'notes.txt', content: 'fixed' }),
+      toolCall('step_done', { summary: 'Fixed the collision detection' }),
+      toolCall('finish', { message: 'Done' }),
+    ][n] };
+  });
+  const { result, events, agent } = await runAgent(settingsFor(mock.url), 'fix it');
+  mock.close();
+  assert.equal(result.status, 'done');
+  assert.equal(events.find((e) => e.type === 'plan').steps[0].text, 'Fix the collision bug', 'status tags are stripped from step text');
+  assert.equal(events.filter((e) => e.type === 'step_note').length, 1, 'only the step backed by a write was accepted');
+  assert.ok(agent.history.some((h) => h.role === 'tool' && /no file was written or edited during this step/.test(h.content)));
+});
+
+test('web: GitHub pages are read as raw code or file lists', () => {
+  const { githubTarget } = require('../src/tools/web');
+  assert.deepEqual(githubTarget('https://github.com/a/b/blob/main/src/game.js'), { raw: 'https://raw.githubusercontent.com/a/b/main/src/game.js' });
+  assert.equal(githubTarget('https://github.com/a/b').api, 'https://api.github.com/repos/a/b/contents/');
+  assert.equal(githubTarget('https://github.com/a/b/tree/dev/src').api, 'https://api.github.com/repos/a/b/contents/src?ref=dev');
+  assert.equal(githubTarget('https://github.com/a/b/issues/1'), null);
+  assert.equal(githubTarget('https://example.com/a/b'), null);
+});
+
+test('file_edit copes with escaped line breaks and different indentation from small models', () => {
+  const { locateEdit } = require('../src/tools');
+  const t = 'function f() {\n    x = 1;\n    y = 2;\n}\n';
+  assert.equal(locateEdit(t, 'x = 1;\\n    y = 2;', 'x = 3;\\n    y = 4;').replace, 'x = 3;\n    y = 4;');
+  assert.equal(locateEdit(t, 'x = 1;\n  y = 2;', 'z').start, t.indexOf('x = 1'));
+  assert.equal(locateEdit(t, 'x = 1;', 'x = 1;\\n    z = 0;').replace, 'x = 1;\n    z = 0;');
+  assert.equal(locateEdit(t, 'x = 1;', 'x = "a\\nb";').replace, 'x = "a\\nb";', 'a real string escape is kept');
+  assert.throws(() => locateEdit(t, 'nope', ''), /not found/);
+  assert.throws(() => locateEdit('a;a;', 'a;', 'b'), /matches 2 times/);
+});

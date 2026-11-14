@@ -89,8 +89,42 @@ async function webSearch(query, { settings, signal, max = 8 }) {
   throw new Error('Search failed. ' + errors.join('; '));
 }
 
+/**
+ * GitHub pages are mostly menus once turned into text. Read the code itself instead:
+ * a file (blob) becomes its raw text, and a repository or folder becomes a list of its files with raw links.
+ */
+function githubTarget(url) {
+  const m = /^https?:\/\/(?:www\.)?github\.com\/([^/?#]+)\/([^/?#]+)(?:\/(blob|tree)\/([^/?#]+)(?:\/([^?#]*))?)?\/?(?:[?#].*)?$/i.exec(url);
+  if (!m) return null;
+  const [, owner, repo, kind, ref, rest = ''] = m;
+  const name = repo.replace(/\.git$/, '');
+  if (kind === 'blob') return { raw: `https://raw.githubusercontent.com/${owner}/${name}/${ref}/${rest}` };
+  return { api: `https://api.github.com/repos/${owner}/${name}/contents/${rest}${ref ? `?ref=${encodeURIComponent(ref)}` : ''}`, page: url };
+}
+
+async function fetchGithub(t, { signal, maxChars, offset }) {
+  if (t.raw) return fetchPage(t.raw, { signal, maxChars, offset });
+  const res = await fetch(t.api, { headers: { 'user-agent': UA, accept: 'application/vnd.github+json' }, signal: anySignal(signal, 25000) });
+  if (!res.ok) return null; // rate limited or private: fall back to the normal page
+  const items = await res.json();
+  if (!Array.isArray(items)) return null;
+  const lines = items.map((i) => (i.type === 'dir' ? `${i.name}/  (folder: ${i.html_url})` : `${i.name} (${i.size} bytes): ${i.download_url}`));
+  let text = `Files in this GitHub folder. web_fetch a raw link to read the code:\n${lines.join('\n')}`;
+  const readme = items.find((i) => /^readme(\.md|\.txt)?$/i.test(i.name) && i.download_url);
+  if (readme) {
+    try { text += `\n\n${readme.name}:\n${(await fetchPage(readme.download_url, { signal, maxChars: 3000 })).text}`; } catch { /* README is optional */ }
+  }
+  const slice = text.slice(offset, offset + maxChars);
+  return { url: t.page, text: slice + (offset + maxChars < text.length ? `\n...[call again with offset=${offset + maxChars} for more]` : ''), total: text.length };
+}
+
 async function fetchPage(url, { signal, maxChars = 8000, offset = 0 }) {
   if (!/^https?:\/\//i.test(url)) throw new Error('URL must start with http:// or https://');
+  const gh = githubTarget(url);
+  if (gh) {
+    const r = await fetchGithub(gh, { signal, maxChars, offset });
+    if (r) return r;
+  }
   const res = await fetch(url, { headers: { 'user-agent': UA, accept: 'text/html,application/xhtml+xml,application/json,text/plain,*/*', 'accept-language': 'en-US,en;q=0.9' }, redirect: 'follow', signal: anySignal(signal, 25000) });
   const type = (res.headers.get('content-type') || '').toLowerCase();
   if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText} for ${url}`);
@@ -105,4 +139,4 @@ async function fetchPage(url, { signal, maxChars = 8000, offset = 0 }) {
   return { url: res.url, text: slice + more, total };
 }
 
-module.exports = { webSearch, fetchPage, parseDuckDuckGo, parseBing, truncate };
+module.exports = { webSearch, fetchPage, githubTarget, parseDuckDuckGo, parseBing, truncate };

@@ -8,6 +8,7 @@ const { stripThinking, extractJson, truncate, safePath } = require('./util');
 
 const TOOL_RESULT_FOR_MODEL = 6000;
 const TOOL_RESULT_FOR_UI = 3500;
+const WRITES = ['file_write', 'file_edit', 'game_template', 'make_sprite', 'make_model'];
 
 /**
  * Effort levels, like Claude's: how much work Freehand puts into one request.
@@ -27,7 +28,7 @@ Given the user's request, reply with ONLY a JSON object, no other text:
 - If the request needs real work: {"title": "<3-6 word title>", "steps": ["<imperative step>", ...]} with ${effort.steps} concrete steps.
 - If it is a simple question or chat that needs no tools: {"title": "<3-6 word title>", "answer": "<your complete answer in Markdown>"}.
 Prefer the fewest steps that get a verified result. Do not include a "write the final answer" step; finishing is automatic.
-Games and interactive pages: plan the files, make any 3D models it needs with make_model (or use models the user attached), build it, then end with "Play-test with play_test and fix every error".
+Games: start with "Start from the <flyer|platformer|topdown|blank|3d> game_template", then steps that change game.js to fit the request (rules, looks, sprites with make_sprite, 3D models with make_model), then end with "Play-test with play_test and fix everything it reports". Do not plan web searches for how to code a game; the templates are better.
 ${effort.work}`;
 }
 
@@ -48,10 +49,14 @@ function systemPrompt({ plan, mode, tools, effort, files }) {
     `- ${effort.work}`,
     '',
     'Games, 3D and web pages:',
+    '- New game? Call game_template first (flyer, platformer, topdown, blank, 3d). It writes a working game; then edit game.js with file_edit to fit the request. Do not write a game loop from scratch and do not copy games from the web.',
     '- Build them as files in the workspace: index.html plus .js/.css files and an assets/ folder. Use relative paths ("./assets/tree.glb") so they run anywhere.',
+    '- 2D art: draw sprites with make_sprite (pixel art saved as PNG) and load them with Kit.image. Sound effects: Kit.sfx("jump" | "coin" | "hit" | "boom" | "power").',
+    '- Bugs small models often write: an obstacle pair checked with || so the player dies at once; score added every frame instead of once per obstacle; a second game loop started on restart; listeners added inside functions that run again; drawing an object at a different place than its hitbox; a start button the inputs never reach. Check for these when a game misbehaves.',
     '- For 3D use three.js from a CDN with an import map: {"imports": {"three": "https://unpkg.com/three@0.180.0/build/three.module.js", "three/addons/": "https://unpkg.com/three@0.180.0/examples/jsm/"}}. Load models with GLTFLoader (and OBJLoader/FBXLoader for those formats). For 2D, a plain <canvas> is enough.',
     '- Need a model nobody gave you? Make it with make_model (low-poly shapes, saved as .glb). Models the user attached are in assets/; run model_info on them first to learn their size and animation names.',
-    '- Test like a player: after writing or changing a game, run play_test (with inputs such as "click", "key ArrowRight 600", "key Space") and fix every error and failed file it reports, then test again. Do not finish while play_test still shows errors.',
+    '- Test like a player: after writing or changing a game, run play_test (with inputs such as "click Start", "key Space", "tap Space 8 350", "key ArrowRight 800") and read "What happened", the game state and WATCH OUT, not just Errors. Fix what it reports, then test again. Do not finish while play_test still shows errors or warnings.',
+    '- Only say you fixed or changed something after a file_write or file_edit actually did it. Reading code and testing is not fixing.',
     '- Make the controls and goal clear on screen, and let the player restart.',
     '- If a model or file you need is missing, make it or use a simple shape. Never leave a game broken because an asset failed to load.',
     '',
@@ -72,6 +77,9 @@ function systemPrompt({ plan, mode, tools, effort, files }) {
   }
   return lines.join('\n');
 }
+
+/** Models copy the "[pending]" status tags from the prompt into new steps; drop them. */
+const cleanStep = (t) => String(t).replace(/^\s*(\d+\.\s*)?(\[(pending|active|done)\]\s*)+/i, '').trim();
 
 /** Recognises {"tool": "...", "args": {...}} inside free text (for models without native tool calling). */
 function parseAction(text, toolNames) {
@@ -118,6 +126,8 @@ class Agent {
     this.lastCalls = [];
     this.effort = effortOf(settings);
     this.game = { changed: false, errors: false, nudges: 0 }; // tracks whether the game was play-tested since it last changed
+    this.stepWrites = 0; // files changed during the current plan step
+    this.claimNudges = 0;
     this.failStreak = 0;
   }
 
@@ -143,7 +153,7 @@ class Agent {
   notice(text, level = 'info') { this.emit('notice', { text, level }); }
 
   setPlan(steps) {
-    this.plan = steps.map((text) => ({ text: String(text), status: 'pending' }));
+    this.plan = steps.map((text) => ({ text: cleanStep(text), status: 'pending' }));
     this.advance();
   }
 
@@ -323,6 +333,13 @@ class Agent {
         return this.finish(String(call.args.message || ''), Array.isArray(call.args.files) ? call.args.files : []);
       }
       if (call.name === 'step_done') {
+        const claim = this.unbackedClaim(String(call.args.summary || ''));
+        if (claim) {
+          this.history.push({ role: 'tool', id: call.id, name: call.name, content: claim });
+          this.notice('Freehand claimed a change it had not made, so it is going back to do it.');
+          continue;
+        }
+        this.stepWrites = 0;
         const active = this.plan.find((s) => s.status === 'active');
         if (active) active.status = 'done';
         this.advance();
@@ -332,7 +349,7 @@ class Agent {
       }
       if (call.name === 'revise_plan') {
         const done = this.plan.filter((s) => s.status === 'done');
-        const rest = (Array.isArray(call.args.steps) ? call.args.steps : []).map((t) => ({ text: String(t), status: 'pending' }));
+        const rest = (Array.isArray(call.args.steps) ? call.args.steps : []).map((t) => ({ text: cleanStep(t), status: 'pending' }));
         this.plan = [...done, ...rest];
         this.advance();
         this.history.push({ role: 'tool', id: call.id, name: call.name, content: 'Plan updated.' });
@@ -359,6 +376,7 @@ class Agent {
       }
       this.emit('tool_result', { id: call.id, ok, preview: truncate(output, TOOL_RESULT_FOR_UI) });
       this.trackGame(call, ok, output);
+      if (ok && WRITES.includes(call.name)) this.stepWrites++;
       if (ok && ['file_write', 'file_edit'].includes(call.name)) this.lastCalls = []; // the files changed, so repeating a test or run is new work
       this.failStreak = ok ? 0 : this.failStreak + 1;
       if (this.failStreak === 3) {
@@ -376,7 +394,19 @@ class Agent {
   trackGame(call, ok, output) {
     const p = String((call.args && call.args.path) || '');
     if (['file_write', 'file_edit'].includes(call.name) && ok && /\.(html?|m?js|css)$/i.test(p)) this.game.changed = true;
-    if (call.name === 'play_test' && ok) { this.game.changed = false; this.game.errors = /^(ERRORS|FILES THAT FAILED)/m.test(output); }
+    if (['game_template', 'make_sprite'].includes(call.name) && ok) this.game.changed = true;
+    if (call.name === 'play_test' && ok) { this.game.changed = false; this.game.errors = /^(ERRORS|FILES THAT FAILED|WATCH OUT)/m.test(output); }
+  }
+
+  /**
+   * Small models mark a step "fixed the collision bug" after only reading the code.
+   * A summary that claims a change is sent back when nothing was written during the step.
+   */
+  unbackedClaim(summary) {
+    if (this.stepWrites > 0 || this.claimNudges >= 3) return null;
+    if (!/\b(fix(ed|es)?|implement(ed|s)?|add(ed|s)?|creat(ed|es)|wrote|writ(ten|es)|updat(ed|es)|improv(ed|es)|chang(ed|es)|refactor(ed)?|replac(ed|es)|built|made|correct(ed)?|adjust(ed)?|tun(ed|es)|optimi[sz](ed|es)?)\b/i.test(summary)) return null;
+    this.claimNudges++;
+    return 'Not marked done: your summary says you changed something, but no file was written or edited during this step. Make the change now with file_edit or file_write (or game_template, make_sprite, make_model), then call step_done. If this step really needed no change, call step_done again and say what you checked instead.';
   }
 
   uncheckedGame() {
@@ -385,7 +415,7 @@ class Agent {
     try { hasPage = fs.readdirSync(this.workspace).some((f) => /\.html?$/i.test(f)); } catch { /* no workspace */ }
     if (!hasPage) return null;
     if (this.game.changed) { this.game.nudges++; return 'Not finished yet: you changed the game or page since it was last tested. Run play_test on it (with a few inputs), fix anything it reports, then finish.'; }
-    if (this.game.errors) { this.game.nudges++; return 'Not finished yet: the last play_test reported errors or files that failed to load. Fix them and run play_test again, then finish.'; }
+    if (this.game.errors) { this.game.nudges++; return 'Not finished yet: the last play_test reported errors, warnings or files that failed to load. Fix them and run play_test again, then finish.'; }
     return null;
   }
 

@@ -6,6 +6,7 @@ const { webSearch, fetchPage } = require('./web');
 const { runCommand, runPython } = require('./exec');
 const { buildGlb, modelInfo, SHAPES } = require('./model3d');
 const { previewUrl } = require('../server/preview');
+const { TEMPLATES, installTemplate, makeSprite } = require('./gamekit');
 
 const obj = (properties, required = []) => ({ type: 'object', properties, required });
 const str = (description) => ({ type: 'string', description });
@@ -34,6 +35,29 @@ function listDir(root, rel, depth = 2) {
   };
   walk(base, 1, '');
   return lines.length ? lines.join('\n') : '(empty)';
+}
+
+/** Small models write line breaks inside "find" as a literal \\n, or change the indentation. */
+const unescape = (t) => t.replace(/\\r\\n|\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\(["'`\\])/g, '$1');
+
+/** Finds the one place "find" matches: exactly, then with escapes undone, then ignoring differences in spaces and indentation. */
+function locateEdit(txt, find, replace) {
+  if (!find) throw new Error('"find" is empty.');
+  // A literal \n after ; { } or before indentation is a line break the model escaped by mistake, not a string escape.
+  const fixReplace = /[;{}]\\n|\\n {2,}|\\n\\n/.test(replace) ? unescape(replace) : replace;
+  const tries = [[find, fixReplace]];
+  if (/\\[nt"'`\\]/.test(find)) tries.push([unescape(find), unescape(replace)]);
+  for (const [f, r] of tries) {
+    const count = txt.split(f).length - 1;
+    if (count === 1) { const start = txt.indexOf(f); return { start, end: start + f.length, replace: r }; }
+    if (count > 1) throw new Error(`"find" matches ${count} times; include more surrounding text so it matches once.`);
+  }
+  const [f, r] = tries[tries.length - 1];
+  const words = f.trim().split(/\s+/).map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const hits = [...txt.matchAll(new RegExp(words.join('\\s+'), 'g'))];
+  if (hits.length === 1) return { start: hits[0].index, end: hits[0].index + hits[0][0].length, replace: r.trim() === r ? r : r.trim() };
+  if (hits.length > 1) throw new Error(`"find" matches ${hits.length} times; include more surrounding text so it matches once.`);
+  throw new Error('"find" text not found. Read the file again and copy a few whole lines exactly (use real line breaks, not \\n). For big changes, file_write the whole file.');
 }
 
 function buildTools() {
@@ -136,10 +160,8 @@ function buildTools() {
         const p = safePath(ctx.workspace, a.path);
         if (!fs.existsSync(p)) throw new Error(`No such file: ${a.path}`);
         const txt = fs.readFileSync(p, 'utf8');
-        const find = String(a.find);
-        const count = find ? txt.split(find).length - 1 : 0;
-        if (count !== 1) throw new Error(count === 0 ? '"find" text not found. Read the file again and copy it exactly.' : `"find" matches ${count} times; include more surrounding text so it matches once.`);
-        fs.writeFileSync(p, txt.replace(find, () => String(a.replace)), 'utf8');
+        const m = locateEdit(txt, String(a.find), String(a.replace == null ? '' : a.replace));
+        fs.writeFileSync(p, txt.slice(0, m.start) + m.replace + txt.slice(m.end), 'utf8');
         ctx.emit('file', { path: path.relative(ctx.workspace, p).replace(/\\/g, '/') });
         return `Edited ${a.path}`;
       },
@@ -173,8 +195,9 @@ function buildTools() {
       icon: 'game-controller',
       description:
         'Run a game or web page from the workspace in a real browser and test it like a player. Returns uncaught errors, console errors, files that failed to load, visible text and a screenshot. ' +
-        'Optional "actions" are inputs played in order: "click" (centre), "click X Y", "key ArrowLeft 500" (hold ms), "key Space", "type hello", "mouse X Y", "wait 1000". ' +
-        'Run it after every change to a game and fix every error it reports. The user can play the same file in the Play tab.',
+        'Optional "actions" are inputs played in order: "click" (centre), "click X Y", "click Start Game" (a button by its text), "click #start" (CSS selector), "key ArrowLeft 500" (hold ms), "key Space", "tap Space 8 350" (8 quick presses 350 ms apart, for flapping or jumping games), "type hello", "mouse X Y", "wait 1000". ' +
+        'After each input it says whether the screen changed, and it reports window.__game (state and score) for games built on the game kit. "Errors: none" does not mean the game works: read "What happened" and WATCH OUT. ' +
+        'Run it after every change to a game and fix everything it reports. The user can play the same file in the Play tab.',
       parameters: obj({ path: str('HTML file in the workspace, default index.html'), actions: { type: 'array', items: { type: 'string' }, description: 'inputs to play, e.g. ["click", "key ArrowRight 800", "key Space"]' }, seconds: num('extra seconds to let it run before the screenshot, default 3') }),
       label: (a) => `Play-testing ${a.path || 'index.html'}`,
       async run(a, ctx) {
@@ -185,6 +208,49 @@ function buildTools() {
         const url = await previewUrl(ctx.workspace, page);
         ctx.emit('play', { path: page });
         return ctx.browser().playTest({ url, actions: a.actions, seconds: a.seconds == null ? 3 : Number(a.seconds) });
+      },
+    },
+    {
+      name: 'game_template',
+      icon: 'game-controller',
+      description:
+        'Start a game from a tested starter that already works (title screen, game loop, controls, collisions, score, game over, restart, sounds, high score). ' +
+        `Templates: ${Object.entries(TEMPLATES).map(([k, t]) => `"${k}" (${t.about})`).join('; ')}. ` +
+        'Use it first for any new game, then change game.js (or main.js for 3d) to match the request: rules, numbers in TUNING, drawing, sprites. Much safer than writing a game from scratch.',
+      parameters: obj({ template: { type: 'string', enum: Object.keys(TEMPLATES) }, title: str('game title shown on the title screen'), overwrite: { type: 'boolean', description: 'replace existing index.html/game files' } }, ['template']),
+      label: (a) => `Starting from the ${a.template} game template`,
+      async run(a, ctx) {
+        const kind = String(a.template || '');
+        const files = installTemplate(ctx.workspace, kind, { title: a.title, overwrite: !!a.overwrite });
+        for (const f of files) ctx.emit('file', { path: f });
+        const main = kind === '3d' ? 'main.js' : 'game.js';
+        const text = fs.readFileSync(path.join(ctx.workspace, main), 'utf8');
+        return `Wrote ${files.join(', ')}. This is a working game; play_test it, then change ${main} to fit the request. ` +
+          (kind === '3d' ? '' : 'Do not edit kit.js: it runs the loop, input, title and game-over screens. In game.js, init() resets a round, update(g, dt) moves things (dt in seconds), draw(g, ctx) draws. Kit.gameOver() ends a round; Kit.addScore(n) scores. ') +
+          `\n\n${main}:\n${truncate(text, 7000)}`;
+      },
+    },
+    {
+      name: 'make_sprite',
+      icon: 'paint-brush',
+      description:
+        'Draw pixel-art and save it as a PNG for a 2D game. "pixels" is a list of strings, one per row; each character is one pixel and "." is transparent. "palette" maps each character to a color ("#rrggbb" or a name like red, yellow). ' +
+        '"scale" makes each pixel bigger (default 4). For animation give "frames" (a list of pixel lists, same size) to get a sprite sheet with frames side by side. ' +
+        'Example bird 8x6: {"path":"assets/bird.png","pixels":["..YYYY..",".YYYYWB.","YYYYYYOO","OYYYYYY.",".YYYYY..","..Y..Y.."],"palette":{"Y":"#ffd23f","W":"white","B":"black","O":"orange"}}. Draw it with Kit.image("assets/bird.png") and Kit.drawImage.',
+      parameters: obj({ path: str('where to save, e.g. assets/hero.png'), pixels: { type: 'array', items: { type: 'string' }, description: 'rows of characters' }, palette: { type: 'object', description: 'character -> color' }, scale: num('pixel size, default 4'), frames: { type: 'array', items: { type: 'array', items: { type: 'string' } }, description: 'several pixel grids for an animation sheet' } }, ['path', 'palette']),
+      label: (a) => `Drawing sprite ${a.path}`,
+      async run(a, ctx) {
+        let rel = String(a.path || 'assets/sprite.png');
+        if (!/\.png$/i.test(rel)) rel = rel.replace(/\.[a-z0-9]+$/i, '') + '.png';
+        const r = makeSprite({ pixels: a.pixels, palette: a.palette || {}, scale: a.scale == null ? 4 : a.scale, frames: a.frames });
+        const p = safePath(ctx.workspace, rel);
+        fs.mkdirSync(path.dirname(p), { recursive: true });
+        fs.writeFileSync(p, r.png);
+        const out = path.relative(ctx.workspace, p).replace(/\\/g, '/');
+        ctx.emit('file', { path: out });
+        const sheet = r.frames > 1 ? ` Sprite sheet: ${r.frames} frames, each ${r.frameWidth} px wide.` : '';
+        const warn = r.missing.length ? `\nPROBLEM: these characters are not in the palette and were left transparent: ${r.missing.join(' ')}. Add them to the palette and make it again.` : '';
+        return `Saved ${out} (${r.width}×${r.height} px).${sheet} Load it with Kit.image("${out}").${warn}`;
       },
     },
     {
@@ -265,4 +331,4 @@ function buildTools() {
   return tools;
 }
 
-module.exports = { buildTools, listDir };
+module.exports = { buildTools, listDir, locateEdit };
