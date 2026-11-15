@@ -3,6 +3,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
+const { homeDir } = require('./config');
 
 /*
  * Claude plugins in Freehand. Reads the same files Claude Code uses: plugins installed with /plugin
@@ -15,7 +16,7 @@ const { spawn } = require('child_process');
  */
 
 const claudeDir = () => process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
-const ownDir = () => path.join(process.env.FREEHAND_HOME || path.join(os.homedir(), '.freehand'), 'plugins');
+const ownDir = () => path.join(homeDir(), 'plugins');
 
 const readText = (f) => { try { return fs.readFileSync(f, 'utf8'); } catch { return ''; } };
 const readJson = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };

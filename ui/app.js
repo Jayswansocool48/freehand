@@ -1238,6 +1238,7 @@
     else if (st.state === 'error') { tag.dataset.tone = 'bad'; tag.textContent = 'Can\'t connect'; }
     else if (st.state === 'signing-in') tag.textContent = 'Signing in';
     else if (st.state === 'connecting') tag.textContent = 'Connecting';
+    else if (st.state === 'installing') tag.textContent = 'Installing';
     else tag.textContent = 'Connects when a task starts';
     return tag;
   }
@@ -1294,7 +1295,7 @@
         b.append(toggleRow('Run without asking', 'Off: Freehand asks before each action that changes something in the app. Actions that only read never ask.', !!c.trust, (v) => put({ trust: v })));
         const testBtn = el('button', 'btn', st.state === 'connected' ? 'Reconnect' : 'Connect and test'); testBtn.type = 'button';
         testBtn.addEventListener('click', () => test(c.id));
-        const info = st.state === 'error' ? el('p', 'hint error-text', esc(st.error)) : el('p', 'hint', esc(st.state === 'signing-in' ? 'Finish signing in in your browser.' : st.state === 'connected' ? `Connected${st.server ? ` to ${st.server}` : ''}${c.signedIn ? ', signed in' : ''}.` : 'Not connected yet.'));
+        const info = st.state === 'error' ? el('p', 'hint error-text', esc(st.error)) : el('p', 'hint', esc(st.state === 'signing-in' ? 'Finish signing in in your browser.' : st.state === 'installing' ? `${st.message} This happens once.` : st.state === 'connected' ? `Connected${st.server ? ` to ${st.server}` : ''}${c.signedIn ? ', signed in' : ''}.` : 'Not connected yet.'));
         const signBtns = [];
         if (c.type === 'url' && (c.signedIn || st.needsSignIn)) {
           const sb = el('button', c.signedIn ? 'btn btn-quiet' : 'btn btn-primary', c.signedIn ? 'Sign out' : 'Sign in'); sb.type = 'button';
@@ -1336,7 +1337,9 @@
       else if (c) toast(`${label}: ${c.status.error || 'could not connect'}`, { error: true });
     };
     const test = async (id) => {
-      const r = await call(`/${id}/test`, { method: 'POST' });
+      // The first connect can install programs for a while; show progress until it answers.
+      const poll = setInterval(() => call('').then((v) => v && draw(v)), 1500);
+      const r = await call(`/${id}/test`, { method: 'POST' }).finally(() => clearInterval(poll));
       draw(r);
       const c = r && r.connectors.find((x) => x.id === id);
       if (c && c.status.state === 'connected') toast(`${c.name} connected: ${c.status.tools.length} tools`);

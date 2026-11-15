@@ -5,6 +5,7 @@ const os = require('os');
 const path = require('path');
 const { version } = require('../../package.json');
 const oauth = require('./oauth');
+const setup = require('./setup');
 
 /**
  * Connectors: a small MCP (Model Context Protocol) client, so the agent can use tools from other apps
@@ -14,6 +15,7 @@ const oauth = require('./oauth');
 
 const PROTOCOL = '2025-06-18';
 const CONNECT_TIMEOUT = 20000;
+const FIRST_START_TIMEOUT = 120000; // uvx and npx download the server package the first time
 const CALL_TIMEOUT = 120000;
 
 /** Ready-made connectors the settings page offers. */
@@ -23,7 +25,7 @@ const PRESETS = [
     name: 'Blender',
     type: 'command',
     command: 'uvx blender-mcp',
-    help: 'Needs Blender with the blender-mcp add-on running (in Blender: N panel, BlenderMCP, Connect), and uv installed for the uvx command.',
+    help: 'Freehand installs what this needs (uv, the blender-mcp add-on, and Blender itself if it is missing) and opens Blender when a Blender tool is used.',
   },
   {
     id: 'figma', site: 'figma.com',
@@ -64,7 +66,7 @@ function searchPath() {
     '/home/linuxbrew/.linuxbrew/bin', '/opt/homebrew/bin', '/usr/local/bin',
   ];
   const parts = String(process.env.PATH || '').split(path.delimiter).filter(Boolean);
-  return [...parts, ...extra.filter((d) => !parts.includes(d))].join(path.delimiter);
+  return [...parts, ...[...extra, ...setup.binDirs()].filter((d) => !parts.includes(d))].join(path.delimiter);
 }
 
 const slug = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 24) || 'app';
@@ -119,12 +121,15 @@ class Connection {
   }
 
   async open() {
-    if (this.cfg.type === 'command') this.spawn();
+    if (this.cfg.type === 'command') {
+      await setup.ensure(this.cfg, { searchPath: searchPath(), onStatus: (m) => this.onStatus && this.onStatus(m) });
+      this.spawn();
+    }
     const init = await this.request('initialize', {
       protocolVersion: PROTOCOL,
       capabilities: {},
       clientInfo: { name: 'freehand', version },
-    }, CONNECT_TIMEOUT);
+    }, this.cfg.type === 'command' ? FIRST_START_TIMEOUT : CONNECT_TIMEOUT);
     this.serverName = (init && init.serverInfo && init.serverInfo.name) || '';
     this.instructions = (init && init.instructions) || '';
     await this.notify('notifications/initialized');
@@ -290,6 +295,7 @@ class ConnectorManager {
     if (have) have.conn.close();
     const conn = new Connection(cfg);
     conn.onAuth = (id, auth) => { if (this.saveAuth) this.saveAuth(id, auth); };
+    conn.onStatus = (message) => { if (this.conns.get(cfg.id) === entry) this.status.set(cfg.id, { state: 'installing', message, tools: (this.status.get(cfg.id) || {}).tools || [] }); };
     const entry = { conn, key: this.key(cfg) };
     entry.promise = conn.open().then(
       (c) => { this.status.set(cfg.id, { state: 'connected', tools: c.tools.map((t) => ({ name: t.name, description: t.description || '' })), server: c.serverName }); return c; },
@@ -359,6 +365,7 @@ function agentTool(cfg, t, connect) {
     // Tools that only read never ask; the rest ask unless this connector is trusted.
     approval: readOnly || cfg.trust ? null : (a) => ({ kind: 'connector', title: `${cfg.name}: ${title}`, detail: JSON.stringify(a, null, 2).slice(0, 4000) }),
     async run(a, ctx) {
+      if (setup.isBlender(cfg)) await setup.ensureBlenderOpen();
       const conn = await connect();
       const r = await conn.call(t.name, a, ctx.signal);
       let text = r.text;
