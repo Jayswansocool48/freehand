@@ -1,5 +1,6 @@
 'use strict';
 const { PROVIDER_PRESETS, getApiKey } = require('./config');
+const { isLow } = require('./memory');
 
 class ProviderError extends Error {
   constructor(message, status = 0, opts = {}) {
@@ -145,18 +146,24 @@ async function chatOnce({ settings, providerId, messages, tools, signal }) {
   return { content: content || '', toolCalls, finishReason: choice.finish_reason };
 }
 
-/** Retries rate limits / transient errors with backoff. */
-async function chatWithRetry(opts, onNotice) {
+/**
+ * Retries rate limits / transient errors with backoff. A local model gets longer: when the PC runs
+ * low on memory Ollama's runner dies, and it comes back once onRetry has freed some memory.
+ */
+async function chatWithRetry(opts, onNotice, onRetry) {
   const scale = Number(process.env.FREEHAND_RETRY_SCALE) || 1; // tests shrink the waits
-  const delays = [3000, 8000, 20000].map((d) => d * scale);
+  const local = opts.providerId === 'ollama';
+  const delays = (local ? [3000, 8000, 20000, 30000, 30000, 60000, 60000] : [3000, 8000, 20000]).map((d) => d * scale);
   for (let attempt = 0; ; attempt++) {
     try {
       return await chatOnce(opts);
     } catch (e) {
       if (opts.signal && opts.signal.aborted) throw e;
       if (!(e instanceof ProviderError) || !e.retryable || attempt >= delays.length) throw e;
-      const wait = Math.min(30000 * scale, e.retryAfterMs ? e.retryAfterMs * scale : delays[attempt]);
-      if (onNotice) onNotice(`${opts.providerId}: ${e.status === 429 ? 'rate limited' : 'temporary error'}, retrying in ${Math.round(wait / 1000)}s...`);
+      const wait = Math.min(60000 * scale, e.retryAfterMs ? e.retryAfterMs * scale : delays[attempt]);
+      const why = e.status === 429 ? 'rate limited' : local && isLow() ? 'the PC is low on memory' : 'temporary error';
+      if (onNotice) onNotice(`${opts.providerId}: ${why}, retrying in ${Math.round(wait / 1000)}s...`);
+      if (onRetry) await onRetry(e);
       await sleep(wait, opts.signal);
     }
   }
@@ -166,13 +173,13 @@ async function chatWithRetry(opts, onNotice) {
  * Tries the active provider, then each fallback provider. Free tiers rate-limit hard,
  * so falling through to the next free provider keeps long tasks alive.
  */
-async function chat({ settings, messages, tools, signal, providerOrder, onNotice }) {
+async function chat({ settings, messages, tools, signal, providerOrder, onNotice, onRetry }) {
   const order = providerOrder && providerOrder.length ? providerOrder : [settings.active, ...settings.fallback.filter((id) => id !== settings.active)];
   let lastErr;
   for (let i = 0; i < order.length; i++) {
     const providerId = order[i];
     try {
-      const r = await chatWithRetry({ settings, providerId, messages, tools, signal }, onNotice);
+      const r = await chatWithRetry({ settings, providerId, messages, tools, signal }, onNotice, onRetry);
       return { ...r, providerId };
     } catch (e) {
       if (signal && signal.aborted) throw e;

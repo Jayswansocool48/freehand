@@ -175,6 +175,13 @@ function buildTools() {
         if (!fs.existsSync(p)) throw new Error(`No such file: ${a.path}`);
         const txt = fs.readFileSync(p, 'utf8');
         const m = locateEdit(txt, String(a.find), String(a.replace == null ? '' : a.replace));
+        // Small models "fix" a bug by adding a line the file already has, again and again
+        const found = new Set(txt.slice(m.start, m.end).split('\n').map((l) => l.trim()));
+        const added = m.replace.split('\n').map((l) => l.trim()).filter((l) => l.length > 3 && !found.has(l) && !/^[{}()[\];,]*$/.test(l));
+        const lines = new Set(txt.split('\n').map((l) => l.trim()));
+        if (added.length && added.every((l) => lines.has(l))) {
+          throw new Error(`Not changed: every line this edit adds is already in ${a.path} (${truncate(added[0], 80, false)}). Adding it again does not fix anything. file_read the file, find what is really wrong, and change that instead.`);
+        }
         const out = txt.slice(0, m.start) + m.replace + txt.slice(m.end);
         fs.writeFileSync(p, out, 'utf8');
         ctx.emit('file', { path: path.relative(ctx.workspace, p).replace(/\\/g, '/') });
@@ -242,7 +249,11 @@ function buildTools() {
         const docs = fs.readFileSync(path.join(ctx.workspace, engine), 'utf8').match(/^\/\*[\s\S]*?\*\//);
         return `Wrote ${files.join(', ')}. Now write game.js yourself with file_write (it does not exist yet). Do not edit ${engine} or index.html.\n\n` +
           (kind === '3d'
-            ? 'game.js shape: `import { Kit, THREE } from \'./kit3d.js\';` then function init(g) { build the ground, objects and g.player (with g.player.vel = new THREE.Vector3()) }, function update(g, dt) { move things, check touches, Kit.addScore, Kit.gameOver }, and last Kit.start({ title: document.title, hint: \'how to play\', camera: \'third\', init, update }).'
+            ? 'game.js shape: `import { Kit, THREE } from \'./kit3d.js\';` then function init(g) { build the ground, objects and g.player (with g.player.vel = new THREE.Vector3()) }, function update(g, dt) { move things, check touches, Kit.addScore, Kit.gameOver }, and last Kit.start({ title: document.title, hint: \'how to play\', camera: \'third\', init, update }). ' +
+              'Walking: const dir = Kit.moveInput(); p.vel.x = dir.x * 6; p.vel.z = dir.z * 6; Kit.move(p, dt); Kit.face(p, dir, dt). Do not also set p.position yourself. ' +
+              'Things to collect or dodge: keep your own list. In init: g.coins = []; const c = Kit.model(\'assets/coin.glb\', Kit.shape.cone(0.3, 0.6, \'#ffd700\')); c.position.set(x, 0, z); g.coins.push(c). ' +
+              'In update: for (const c of [...g.coins]) if (Kit.near(g.player, c, 1)) { Kit.remove(c); g.coins.splice(g.coins.indexOf(c), 1); Kit.addScore(1); Kit.sfx(\'coin\'); }. ' +
+              'Kit.model takes a shape (Kit.shape.box/sphere/cone...), not a function.'
             : 'game.js shape: function init(g) { reset the round }, function update(g, dt) { move things, Kit.addScore, Kit.gameOver }, function draw(g, ctx) { draw }, and last Kit.start({ width: 480, height: 640, init, update, draw }).') +
           ' Make models with make_model (3D) or sprites with make_sprite (2D); game_recipe has tested code for common features.' +
           `\n\n${engine} API:\n${docs ? docs[0] : ''}`;
@@ -327,7 +338,7 @@ function buildTools() {
         ctx.emit('file', { path: out });
         ctx.emit('model', { path: out });
         const size = r.bounds.max.map((v, k) => (v - r.bounds.min[k]).toFixed(2)).join(' × ');
-        const lifted = r.lifted ? ` It went below the ground, so it was lifted ${r.lifted.toFixed(2)} m to stand on y = 0.` : '';
+        const lifted = r.lifted > 0 ? ` It went below the ground, so it was lifted ${r.lifted.toFixed(2)} m to stand on y = 0.` : r.lifted < 0 ? ` It hovered above the ground, so it was lowered ${(-r.lifted).toFixed(2)} m to stand on y = 0.` : '';
         const saved = `Saved ${out}: ${r.parts} parts, ${r.triangles} triangles, size ${size} m (bottom at y = 0).${lifted} The user can see it in the viewer. Load it with GLTFLoader from "./${out}".`;
         return r.warnings.length ? `${saved}\nPROBLEMS, fix them and call make_model again:\n- ${r.warnings.join('\n- ')}` : saved;
       },

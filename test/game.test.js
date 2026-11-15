@@ -435,3 +435,12 @@ test('agent says it is stuck when play_test keeps reporting the same error', () 
   assert.match(agent.repeatedError(report), /STUCK[\s\S]*file_read game\.js[\s\S]*line 20/);
   assert.equal(agent.repeatedError('Played ./index.html\nErrors: none'), '');
 });
+
+test('file_edit refuses an edit that only adds lines the file already has', async () => {
+  const ws = fs.mkdtempSync(path.join(home, 'ws-'));
+  fs.writeFileSync(path.join(ws, 'game.js'), "const knight = Kit.model('a.glb');\ng.player = knight;\n");
+  const { ctx } = ctxFor(ws);
+  await assert.rejects(tool('file_edit').run({ path: 'game.js', find: "const knight = Kit.model('a.glb');", replace: "const knight = Kit.model('a.glb');\ng.player = knight;" }, ctx), /already in game\.js/);
+  await tool('file_edit').run({ path: 'game.js', find: 'g.player = knight;', replace: 'g.player = knight;\ng.player.vel = new THREE.Vector3();' }, ctx);
+  assert.match(fs.readFileSync(path.join(ws, 'game.js'), 'utf8'), /vel = new THREE/);
+});

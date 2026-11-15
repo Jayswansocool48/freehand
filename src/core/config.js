@@ -124,7 +124,7 @@ function publicSettings(settings) {
   s.search.hasBraveKey = !!settings.search.braveKey || !!process.env.BRAVE_API_KEY;
   delete s.search.braveKey;
   // Connector env vars and headers often hold tokens: the page only learns their names.
-  s.connectors = (s.connectors || []).map((c) => ({ ...c, env: Object.keys(c.env || {}), headers: Object.keys(c.headers || {}) }));
+  s.connectors = (s.connectors || []).map(({ oauth, ...c }) => ({ ...c, env: Object.keys(c.env || {}), headers: Object.keys(c.headers || {}), signedIn: !!oauth }));
   return s;
 }
 

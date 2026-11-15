@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const os = require('os');
 const path = require('path');
 const { version } = require('../../package.json');
+const oauth = require('./oauth');
 
 /**
  * Connectors: a small MCP (Model Context Protocol) client, so the agent can use tools from other apps
@@ -31,6 +32,16 @@ const PRESETS = [
     url: 'http://127.0.0.1:3845/mcp',
     help: 'Needs the Figma desktop app with Dev Mode: Preferences, Enable Dev Mode MCP Server.',
   },
+  // Online apps, the same connectors Claude has. "signIn" ones open the app's sign-in page once.
+  { id: 'linear', name: 'Linear', type: 'url', url: 'https://mcp.linear.app/mcp', signIn: true, help: 'Your Linear issues, projects and comments. Sign in with your Linear account.' },
+  { id: 'notion', name: 'Notion', type: 'url', url: 'https://mcp.notion.com/mcp', signIn: true, help: 'Your Notion pages and databases. Sign in with your Notion account.' },
+  { id: 'higgsfield', name: 'Higgsfield', type: 'url', url: 'https://mcp.higgsfield.ai/mcp', signIn: true, help: 'Image, video and 3D generation with your Higgsfield credits. Sign in with your Higgsfield account.' },
+  { id: 'cloudflare', name: 'Cloudflare', type: 'url', url: 'https://mcp.cloudflare.com/mcp', signIn: true, help: 'Your Cloudflare account: Workers, storage and settings. Sign in with Cloudflare.' },
+  { id: 'stripe', name: 'Stripe', type: 'url', url: 'https://mcp.stripe.com', signIn: true, help: 'Your Stripe account. Sign in with Stripe.' },
+  { id: 'wix', name: 'Wix', type: 'url', url: 'https://mcp.wix.com/mcp', signIn: true, help: 'Your Wix sites. Sign in with your Wix account.' },
+  { id: 'github', name: 'GitHub', type: 'url', url: 'https://api.githubcopilot.com/mcp/', token: true, help: 'Your GitHub repositories, issues and pull requests. GitHub does not allow sign-in from new apps, so paste a personal access token (make one at github.com/settings/tokens).' },
+  { id: 'context7', name: 'Context7', type: 'url', url: 'https://mcp.context7.com/mcp', help: 'Up-to-date documentation for code libraries such as three.js. No sign-in needed.' },
+  { id: 'firecrawl', name: 'Firecrawl', type: 'url', url: 'https://mcp.firecrawl.dev/v2/mcp', help: 'Web search and page reading. No sign-in needed for light use.' },
 ];
 
 /** Splits a command line into words, keeping "quoted parts" together. */
@@ -183,15 +194,26 @@ class Connection {
       this.child.stdin.write(JSON.stringify(msg) + '\n');
       return;
     }
-    const headers = { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'mcp-protocol-version': PROTOCOL, ...(this.cfg.headers || {}) };
-    if (this.session) headers['mcp-session-id'] = this.session;
-    const res = await fetch(this.cfg.url, { method: 'POST', headers, body: JSON.stringify(msg), signal });
+    if (this.cfg.oauth && oauth.expired(this.cfg.oauth)) await this.renewAuth();
+    const post = () => {
+      const headers = { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'mcp-protocol-version': PROTOCOL, ...(this.cfg.headers || {}) };
+      if (this.cfg.oauth) headers.authorization = `Bearer ${this.cfg.oauth.access_token}`;
+      if (this.session) headers['mcp-session-id'] = this.session;
+      return fetch(this.cfg.url, { method: 'POST', headers, body: JSON.stringify(msg), signal });
+    };
+    let res = await post();
+    if (res.status === 401 && this.cfg.oauth && this.cfg.oauth.refresh_token) { await this.renewAuth(); res = await post(); }
     const sid = res.headers.get('mcp-session-id');
     if (sid) this.session = sid;
     if (res.status === 202 || res.status === 204) return;
     if (!res.ok) {
       const body = (await res.text().catch(() => '')).slice(0, 300);
-      throw new Error(res.status === 401 || res.status === 403 ? `The app refused the connection (${res.status}). It may need a sign-in token.` : `HTTP ${res.status} ${body}`);
+      if (res.status === 401 || res.status === 403) {
+        const e = new Error(this.cfg.oauth ? `The app refused the sign-in (${res.status}). Sign in again.` : `This app needs you to sign in (${res.status}). Press Sign in.`);
+        e.needsSignIn = true;
+        throw e;
+      }
+      throw new Error(`HTTP ${res.status} ${body}`);
     }
     const type = res.headers.get('content-type') || '';
     if (type.includes('text/event-stream')) {
@@ -218,6 +240,12 @@ class Connection {
     }
   }
 
+  /** Swaps a used-up token for a new one and lets the manager save it. */
+  async renewAuth() {
+    this.cfg = { ...this.cfg, oauth: await oauth.refresh(this.cfg.oauth) };
+    if (this.onAuth) this.onAuth(this.cfg.id, this.cfg.oauth);
+  }
+
   request(method, params, timeout = CALL_TIMEOUT, signal) {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
@@ -241,7 +269,7 @@ class Connection {
     this.failAll(new Error('Connector closed'));
     if (this.child) { try { this.child.kill(); } catch { /* already gone */ } }
     if (this.session && this.cfg.type === 'url') {
-      fetch(this.cfg.url, { method: 'DELETE', headers: { 'mcp-session-id': this.session, ...(this.cfg.headers || {}) } }).catch(() => {});
+      fetch(this.cfg.url, { method: 'DELETE', headers: { 'mcp-session-id': this.session, ...(this.cfg.headers || {}), ...(this.cfg.oauth ? { authorization: `Bearer ${this.cfg.oauth.access_token}` } : {}) } }).catch(() => {});
     }
   }
 }
@@ -261,10 +289,11 @@ class ConnectorManager {
     if (have && have.key === this.key(cfg) && !have.conn.closed) return have.promise;
     if (have) have.conn.close();
     const conn = new Connection(cfg);
+    conn.onAuth = (id, auth) => { if (this.saveAuth) this.saveAuth(id, auth); };
     const entry = { conn, key: this.key(cfg) };
     entry.promise = conn.open().then(
       (c) => { this.status.set(cfg.id, { state: 'connected', tools: c.tools.map((t) => ({ name: t.name, description: t.description || '' })), server: c.serverName }); return c; },
-      (e) => { conn.close(); if (this.conns.get(cfg.id) === entry) this.conns.delete(cfg.id); this.status.set(cfg.id, { state: 'error', error: e.message, tools: (this.status.get(cfg.id) || {}).tools || [] }); throw e; }
+      (e) => { conn.close(); if (this.conns.get(cfg.id) === entry) this.conns.delete(cfg.id); this.status.set(cfg.id, { state: 'error', error: e.message, needsSignIn: !!e.needsSignIn, tools: (this.status.get(cfg.id) || {}).tools || [] }); throw e; }
     );
     this.conns.set(cfg.id, entry);
     this.status.set(cfg.id, { state: 'connecting', tools: (this.status.get(cfg.id) || {}).tools || [] });
@@ -272,6 +301,16 @@ class ConnectorManager {
   }
 
   async test(cfg) { this.drop(cfg.id); return this.get(cfg); }
+
+  /** Opens the app's sign-in page and waits for the user. Returns the sign-in to save, or null if it needs none. */
+  async signIn(cfg, opts) {
+    if (cfg.type !== 'url') throw new Error('Only connectors with an address have a sign-in.');
+    this.status.set(cfg.id, { state: 'signing-in', tools: (this.status.get(cfg.id) || {}).tools || [] });
+    try { return await oauth.signIn(cfg.url, opts); } catch (e) {
+      this.status.set(cfg.id, { state: 'error', error: e.message, needsSignIn: true, tools: [] });
+      throw e;
+    }
+  }
 
   drop(id) {
     const have = this.conns.get(id);

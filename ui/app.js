@@ -1104,9 +1104,9 @@
       segmented('Shell and Python commands', [['ask', 'Ask me first'], ['auto', 'Run without asking']], s.approval, (v) => patchSettings({ approval: v }).then(renderSettings)),
       el('p', 'hint', s.approval === 'ask' ? 'Each command waits for you to press Allow.' : 'Commands run as soon as the model writes them, including ones a web page talked it into.'),
     ]));
-    const steps = el('input'); steps.type = 'number'; steps.min = '5'; steps.max = '200'; steps.value = s.maxSteps; steps.setAttribute('aria-label', 'Most tool steps per request');
+    const steps = el('input'); steps.type = 'number'; steps.min = '5'; steps.max = '200'; steps.value = s.maxSteps; steps.setAttribute('aria-label', 'Steps between progress checks');
     steps.addEventListener('change', () => patchSettings({ maxSteps: Number(steps.value) }));
-    safety.append(settingRow('Most tool steps per request', 'Stops a task that loops. From 5 to 200, at High effort. Low uses 40% of it, Medium 70%, Max 250%.', steps));
+    safety.append(settingRow('Steps between progress checks', 'After this many tool steps Freehand checks its progress. It keeps going by itself while it is still writing files or finishing plan steps, and stops only when a whole stretch changed nothing. From 5 to 200, at High effort. Low uses 40% of it, Medium 70%, Max 250%.', steps));
 
     const web = section('Web search', 'For the web_search tool. Search words go to the provider you pick.');
     let braveRow;
@@ -1126,13 +1126,15 @@
     const st = c.status || {};
     if (c.enabled === false) tag.textContent = 'Off';
     else if (st.state === 'connected') { tag.dataset.tone = 'ok'; tag.append(el('span', 'dot'), document.createTextNode(`${st.tools.length - (c.disabledTools || []).filter((n) => st.tools.some((t) => t.name === n)).length} tools`)); }
+    else if (st.state === 'error' && st.needsSignIn) { tag.dataset.tone = 'bad'; tag.textContent = 'Needs sign-in'; }
     else if (st.state === 'error') { tag.dataset.tone = 'bad'; tag.textContent = 'Can\'t connect'; }
+    else if (st.state === 'signing-in') tag.textContent = 'Signing in';
     else if (st.state === 'connecting') tag.textContent = 'Connecting';
     else tag.textContent = 'Connects when a task starts';
     return tag;
   }
   function settingsConnectors(body) {
-    const intro = section('Connectors', 'Connect other apps so Freehand can use them: Blender to build 3D scenes and models, Figma to read your designs. Any app with an MCP server works.');
+    const intro = section('Connectors', 'Connect other apps so Freehand can use them: Blender to build 3D scenes and models, Figma to read your designs, Linear and Notion for your notes and to-dos. Any app with an MCP server works.');
     const box = el('div', 'stack-sm');
     intro.append(box);
     const own = section('Add your own', 'For any other app with an MCP server. Its instructions give either a command to run or an address.');
@@ -1151,8 +1153,17 @@
         const head = el('div', 'own-head');
         const t = el('span', 'grow'); t.append(el('b', '', esc(p.name)), el('small', '', esc(p.command || p.url)));
         const add = el('button', 'btn', 'Add'); add.type = 'button';
-        add.addEventListener('click', async () => { add.disabled = true; const x = await call('', { method: 'POST', body: { name: p.name, type: p.type, command: p.command, url: p.url } }, `${p.name} added`); if (x) { open.add(x.added[0]); draw(x); test(x.added[0]); } else add.disabled = false; });
-        head.append(ic('plug'), t, add);
+        let tok = null;
+        if (p.token) { tok = el('input'); tok.type = 'password'; tok.autocomplete = 'off'; tok.placeholder = 'Access token'; tok.setAttribute('aria-label', `${p.name} access token`); }
+        add.addEventListener('click', async () => {
+          if (tok && !tok.value.trim()) return tok.focus();
+          add.disabled = true;
+          const x = await call('', { method: 'POST', body: { name: p.name, type: p.type, command: p.command, url: p.url, token: tok ? tok.value.trim() : undefined } }, `${p.name} added`);
+          if (!x) { add.disabled = false; return; }
+          open.add(x.added[0]); draw(x);
+          if (p.signIn) signIn(x.added[0], p.name); else test(x.added[0]);
+        });
+        head.append(ic('plug'), t, ...(tok ? [tok] : []), add);
         row.append(head, el('p', 'hint', esc(p.help)));
         box.append(row);
       }
@@ -1173,9 +1184,15 @@
         b.append(toggleRow('Run without asking', 'Off: Freehand asks before each action that changes something in the app. Actions that only read never ask.', !!c.trust, (v) => put({ trust: v })));
         const testBtn = el('button', 'btn', st.state === 'connected' ? 'Reconnect' : 'Connect and test'); testBtn.type = 'button';
         testBtn.addEventListener('click', () => test(c.id));
-        const info = st.state === 'error' ? el('p', 'hint error-text', esc(st.error)) : el('p', 'hint', esc(st.state === 'connected' ? `Connected${st.server ? ` to ${st.server}` : ''}.` : 'Not connected yet.'));
+        const info = st.state === 'error' ? el('p', 'hint error-text', esc(st.error)) : el('p', 'hint', esc(st.state === 'signing-in' ? 'Finish signing in in your browser.' : st.state === 'connected' ? `Connected${st.server ? ` to ${st.server}` : ''}${c.signedIn ? ', signed in' : ''}.` : 'Not connected yet.'));
+        const signBtns = [];
+        if (c.type === 'url' && (c.signedIn || st.needsSignIn)) {
+          const sb = el('button', c.signedIn ? 'btn btn-quiet' : 'btn btn-primary', c.signedIn ? 'Sign out' : 'Sign in'); sb.type = 'button';
+          sb.addEventListener('click', () => (c.signedIn ? call(`/${c.id}/signout`, { method: 'POST' }, `Signed out of ${c.name}`).then(draw) : signIn(c.id, c.name)));
+          signBtns.push(sb);
+        }
         const extra = [c.env && c.env.length ? `Settings: ${c.env.join(', ')}` : '', c.headers && c.headers.length ? `Headers: ${c.headers.join(', ')}` : ''].filter(Boolean).join(' · ');
-        b.append(settingRow('Connection', extra || null, [testBtn, info]));
+        b.append(settingRow('Connection', extra || null, [...signBtns, testBtn, info]));
         if ((st.tools || []).length) {
           const list = el('div', 'stack-sm');
           for (const t of st.tools) {
@@ -1196,6 +1213,17 @@
         box.append(d);
       }
       if (!r.connectors.length) box.append(el('p', 'hint', 'No connectors yet.'));
+    };
+    const signIn = async (id, label) => {
+      toast(`Opening the ${label} sign-in page in your browser`);
+      const pending = call('');
+      pending.then((r) => r && draw({ ...r, connectors: r.connectors.map((c) => (c.id === id ? { ...c, status: { ...c.status, state: 'signing-in' } } : c)) }));
+      const r = await call(`/${id}/signin`, { method: 'POST' });
+      draw(r);
+      const c = r && r.connectors.find((x) => x.id === id);
+      if (r && r.error) toast(`${label}: ${r.error}`, { error: true });
+      else if (c && c.status.state === 'connected') toast(`${label} connected: ${c.status.tools.length} tools`);
+      else if (c) toast(`${label}: ${c.status.error || 'could not connect'}`, { error: true });
     };
     const test = async (id) => {
       const r = await call(`/${id}/test`, { method: 'POST' });

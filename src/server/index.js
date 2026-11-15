@@ -12,6 +12,11 @@ const { TaskStore } = require('./tasks');
 const { previewUrl, ensurePreview } = require('./preview');
 const ollama = require('../core/ollama');
 const mcp = require('../core/mcp');
+// A connector's token was refreshed while in use: keep the new one so the user stays signed in.
+mcp.manager.saveAuth = (id, auth) => {
+  const s = loadSettings();
+  saveSettings({ ...s, connectors: (s.connectors || []).map((c) => (c.id === id ? { ...c, oauth: auth } : c)) });
+};
 
 const UI_DIR = path.join(__dirname, '..', '..', 'ui');
 const MIME = {
@@ -142,6 +147,22 @@ function startServer({ port = 0, host = '127.0.0.1', token = crypto.randomBytes(
         if (typeof p.name === 'string' && p.name.trim()) c.name = p.name.replace(/[^\p{L}\p{N} ._-]/gu, '').trim().slice(0, 40) || c.name;
         if (c.enabled === false) mcp.manager.drop(c.id);
         save(list.map((x, j) => (j === i ? c : x)));
+        return send(res, 200, view());
+      }
+      if (method === 'POST' && parts[2] === 'signin') {
+        const ac = new AbortController();
+        res.on('close', () => { if (!res.writableFinished) ac.abort(); });
+        let auth;
+        try { auth = await mcp.manager.signIn(list[i], { signal: ac.signal }); } catch (e) { return send(res, 200, { ...view(), error: e.message }); }
+        const fresh = loadSettings();
+        const next = (fresh.connectors || []).map((c) => (c.id === parts[1] ? { ...c, oauth: auth || undefined } : c));
+        saveSettings({ ...fresh, connectors: next });
+        try { await mcp.manager.test(next.find((c) => c.id === parts[1])); } catch { /* the status carries the error */ }
+        return send(res, 200, view());
+      }
+      if (method === 'POST' && parts[2] === 'signout') {
+        mcp.manager.drop(parts[1]);
+        save(list.map((c, j) => { if (j !== i) return c; const { oauth, ...rest } = c; return rest; }));
         return send(res, 200, view());
       }
       if (method === 'POST' && parts[2] === 'test') {

@@ -32,6 +32,14 @@ const SNAPSHOT_FN = `() => {
   return { title: document.title, url: location.href, elements: out, text: text.slice(0, 2500), scrollY: Math.round(scrollY), height: document.documentElement.scrollHeight, viewport: innerHeight };
 }`;
 
+// Lean settings: the browser shares an 11 GB PC with the local model, so it keeps to one page's worth of memory.
+const LAUNCH_ARGS = [
+  '--no-sandbox', '--enable-unsafe-swiftshader', '--autoplay-policy=no-user-gesture-required',
+  '--renderer-process-limit=2', '--disable-extensions', '--disable-background-networking', '--disable-component-update',
+  '--disable-dev-shm-usage', '--js-flags=--max-old-space-size=512',
+];
+const CRASHED = /Target (page, context or browser )?(has been )?closed|browser has been closed|Browser closed|crash/i;
+
 /** One lazily-launched browser per task. */
 class BrowserSession {
   constructor({ headless = true, shotsDir, onShot }) {
@@ -55,13 +63,15 @@ class BrowserSession {
     let lastErr;
     for (let round = 0; round < 2 && !this.browser; round++) {
       for (const opts of attempts) {
-        try { this.browser = await chromium.launch({ ...opts, args: ['--no-sandbox', '--enable-unsafe-swiftshader', '--autoplay-policy=no-user-gesture-required'] }); break; } catch (e) { lastErr = e; }
+        try { this.browser = await chromium.launch({ ...opts, args: LAUNCH_ARGS }); break; } catch (e) { lastErr = e; }
       }
       if (!this.browser && round === 0) installChromium(this.headless); // one automatic attempt to download Chromium
     }
     if (!this.browser) {
       throw new Error('No browser available. Install Chrome/Edge, or run "npm run setup-browser" once. Detail: ' + String(lastErr && lastErr.message).split('\n')[0]);
     }
+    const browser = this.browser;
+    browser.on('disconnected', () => { if (this.browser === browser) { this.browser = null; this.page = null; } }); // crashed or killed for memory
     const ctx = await this.browser.newContext({ viewport: { width: 1280, height: 800 }, locale: 'en-US' });
     this.page = await ctx.newPage();
     this.page.setDefaultTimeout(15000);
@@ -141,7 +151,18 @@ class BrowserSession {
    * actions: "click", "click X Y", "click #id", "click Some text", "key KEY [ms]", "tap KEY [times] [gap ms]", "type TEXT", "mouse X Y", "wait MS".
    * Each input is followed by a note on what changed on screen, and window.__game (if the game sets it) is reported.
    */
-  async playTest({ url, actions = [], seconds = 3 }) {
+  /** Plays the page; if the browser crashed (often from low memory), reopens it and plays once more. */
+  async playTest(opts) {
+    try {
+      return await this.playTestOnce(opts);
+    } catch (e) {
+      if (!CRASHED.test(String(e && e.message))) throw e;
+      await this.close();
+      return this.playTestOnce(opts);
+    }
+  }
+
+  async playTestOnce({ url, actions = [], seconds = 3 }) {
     await this.launch();
     const page = this.page;
     const errors = [], consoleLines = [], failed = [];

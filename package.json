@@ -1,7 +1,7 @@
 {
   "name": "freehand-agent",
   "productName": "Freehand",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Autonomous AI agent (plan, search, browse, code, files) that runs on free models: Ollama local or free cloud tiers.",
   "main": "electron/main.js",
   "license": "MIT",

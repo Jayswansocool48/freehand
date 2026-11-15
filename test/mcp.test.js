@@ -122,3 +122,57 @@ test('agent: uses a connected app\'s tools, asks before changing things, saves r
     assert.equal(fs.readFileSync(path.join(ws, 'connector-images', img[0]), 'utf8'), 'png!');
   } finally { m.closeAll(); prov.close(); }
 });
+
+test('connectors: signs in to a web app with OAuth and refreshes the token', async () => {
+  const oauth = require('../src/core/oauth');
+  let issued = 0;
+  let live = '';
+  const srv = http.createServer(async (req, res) => {
+    let body = '';
+    for await (const c of req) body += c;
+    const base = `http://127.0.0.1:${srv.address().port}`;
+    const json = (code, o, h = {}) => { res.writeHead(code, { 'content-type': 'application/json', ...h }); res.end(JSON.stringify(o)); };
+    if (req.url === '/.well-known/oauth-protected-resource/mcp') return json(200, { resource: `${base}/mcp`, authorization_servers: [base] });
+    if (req.url === '/.well-known/oauth-authorization-server') return json(200, { authorization_endpoint: `${base}/authorize`, token_endpoint: `${base}/token`, registration_endpoint: `${base}/register` });
+    if (req.url === '/register') return json(201, { client_id: 'fh-client', redirect_uris: JSON.parse(body).redirect_uris });
+    if (req.url === '/token') {
+      const f = new URLSearchParams(body);
+      if (f.get('grant_type') === 'authorization_code' && (f.get('code') !== 'abc' || !f.get('code_verifier'))) return json(400, { error: 'invalid_grant' });
+      live = `tok${++issued}`;
+      return json(200, { access_token: live, refresh_token: 'r1', expires_in: 3600 });
+    }
+    if (req.url === '/mcp') {
+      if (req.headers.authorization !== `Bearer ${live}` || !live) {
+        return json(401, {}, { 'www-authenticate': `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource/mcp"` });
+      }
+      const m = JSON.parse(body);
+      if (m.id === undefined) { res.writeHead(202); return res.end(); }
+      return json(200, { jsonrpc: '2.0', id: m.id, result: m.method === 'initialize' ? { serverInfo: { name: 'fake' } } : { tools: [{ name: 'ping', inputSchema: { type: 'object' } }] } });
+    }
+    res.writeHead(404); res.end();
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const url = `http://127.0.0.1:${srv.address().port}/mcp`;
+  // The "browser" follows the sign-in link and the app sends it back to Freehand with a code.
+  const auth = await oauth.signIn(url, {
+    open: (link) => {
+      const u = new URL(link);
+      assert.equal(u.searchParams.get('code_challenge_method'), 'S256');
+      assert.equal(u.searchParams.get('resource'), url);
+      fetch(`${u.searchParams.get('redirect_uri')}?code=abc&state=${u.searchParams.get('state')}`);
+    },
+  });
+  assert.equal(auth.access_token, 'tok1');
+  assert.equal(auth.client_id, 'fh-client');
+
+  const m = new ConnectorManager();
+  const saved = [];
+  m.saveAuth = (id, a) => saved.push([id, a.access_token]);
+  live = 'tok-new-on-server'; // the stored token has been revoked, so the first request gets 401
+  issued = 5;
+  const conn = await m.get({ id: 'fake', name: 'Fake', type: 'url', url, oauth: auth });
+  assert.equal(conn.tools[0].name, 'ping');
+  assert.deepEqual(saved, [['fake', 'tok6']], 'refreshed once and saved the new token');
+  m.closeAll();
+  srv.close();
+});

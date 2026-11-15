@@ -7,6 +7,7 @@ const { BrowserSession } = require('../tools/browser');
 const { stripThinking, extractJson, truncate, safePath } = require('./util');
 const { TEMPLATES } = require('../tools/gamekit');
 const mcp = require('./mcp');
+const memory = require('./memory');
 
 const TOOL_RESULT_FOR_MODEL = 6000;
 const TOOL_RESULT_FOR_UI = 3500;
@@ -140,6 +141,7 @@ class Agent {
     this.effort = effortOf(settings);
     this.game = { changed: false, errors: false, nudges: 0 }; // tracks whether the game was play-tested since it last changed
     this.stepWrites = 0; // files changed during the current plan step
+    this.writes = 0; // files changed during the whole task, to tell progress from going round in circles
     this.claimNudges = 0;
     this.failStreak = 0;
     this.lastError = '';
@@ -208,7 +210,18 @@ class Agent {
   }
 
   async callModel(messages, tools) {
-    return chat({ settings: this.settings, messages, tools, signal: this.signal, onNotice: (t) => this.notice(t, 'warn') });
+    if (memory.isLow()) await this.freeMemory();
+    return chat({
+      settings: this.settings, messages, tools, signal: this.signal, onNotice: (t) => this.notice(t, 'warn'),
+      onRetry: async () => { await this.freeMemory(); await memory.waitForMemory(60000, this.signal); },
+    });
+  }
+
+  /** Closes the test browser when memory runs low, so the local model has room. It reopens on the next play_test. */
+  async freeMemory() {
+    if (!this.browserSession || !this.browserSession.browser) return;
+    await this.browserSession.close();
+    this.notice(`Memory is low (${memory.availableMB()} MB free), so Freehand closed its test browser to make room. It reopens for the next play-test.`, 'warn');
   }
 
   /** Planning call: returns { title, steps } or { title, answer }. */
@@ -364,12 +377,25 @@ class Agent {
     }
   }
 
+  /**
+   * Runs tool steps until the task finishes. The "most tool steps" setting is a checkpoint, not a stop:
+   * at each one Freehand keeps going by itself while it is still getting somewhere (files changed or plan
+   * steps done since the last checkpoint), and stops only when a whole stretch made no progress.
+   */
   async loop() {
     const max = Math.max(5, Math.min(250, Math.round(this.settings.maxSteps * this.effort.turns)));
+    const ceiling = max * 8; // a runaway guard, far past any real task
     let retries = 0;
     let textNudges = 0;
-    for (let turn = 0; turn < max; turn++) {
+    let mark = this.progress();
+    for (let turn = 0; turn < ceiling; turn++) {
       if (this.signal.aborted) throw new Error('Aborted');
+      if (turn && turn % max === 0) {
+        const now = this.progress();
+        if (now === mark) break;
+        mark = now;
+        this.notice(`Freehand has used ${turn} steps and is still making progress, so it keeps going.`);
+      }
       const d = await this.decide();
 
       if (d.retry) {
@@ -452,7 +478,7 @@ class Agent {
       this.emit('tool_result', { id: call.id, ok, preview: truncate(output, TOOL_RESULT_FOR_UI) });
       if (ok && call.name === 'play_test') output += this.repeatedError(output);
       this.trackGame(call, ok, output);
-      if (ok && WRITES.includes(call.name)) this.stepWrites++;
+      if (ok && WRITES.includes(call.name)) { this.stepWrites++; this.writes++; }
       if (ok && ['file_write', 'file_edit'].includes(call.name)) this.lastCalls = []; // the files changed, so repeating a test or run is new work
       this.failStreak = ok ? 0 : this.failStreak + 1;
       if (this.failStreak === 3) {
@@ -460,10 +486,15 @@ class Agent {
       }
       this.history.push({ role: 'tool', id: call.id, name: call.name, content: truncate(output, TOOL_RESULT_FOR_MODEL) });
     }
-    const msg = `I reached the step limit (${max}) before finishing. Progress so far is in the workspace; you can reply "continue" to keep going.`;
+    const msg = `I stopped because the last ${max} steps changed nothing: no file was written and no plan step was finished, so I was going round in circles. What I made so far is in the workspace. Tell me what to change or try, and I will pick it up from there.`;
     this.emit('final', { message: msg, files: [] });
     this.emit('status', { status: 'stopped' });
     return { status: 'stopped', message: msg };
+  }
+
+  /** A count that grows whenever the task gets somewhere: a file written or a plan step finished. */
+  progress() {
+    return this.writes + this.plan.filter((s) => s.status === 'done').length;
   }
 
   /**

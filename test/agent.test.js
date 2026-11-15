@@ -111,6 +111,20 @@ test('effort: changes the plan size, the step budget and the instructions', asyn
   assert.equal(events.filter((e) => e.type === 'tool').length, 8, 'low effort gets 40% of 20 steps');
 });
 
+test('agent: keeps going past the step limit while it is making progress', async () => {
+  let calls = 0;
+  const mock = await mockProvider((body) => {
+    if (!body.tools) return { message: text('{"title":"Many files","steps":["Write twenty files"]}') };
+    calls++;
+    if (calls <= 20) return { message: toolCall('file_write', { path: `f${calls}.txt`, content: 'x' }) };
+    return { message: toolCall('finish', { message: 'Wrote them all' }) };
+  });
+  const { result, events } = await runAgent(settingsFor(mock.url, { effort: 'low', maxSteps: 20 }), 'write twenty files');
+  mock.close();
+  assert.equal(result.status, 'done', 'no "reply continue" stop after 8 steps');
+  assert.ok(events.some((e) => e.type === 'notice' && /still making progress/.test(e.text)));
+});
+
 test('agent: falls back to JSON tool mode when the model rejects native tools', async () => {
   const mock = await mockProvider((body) => {
     if (!body.tools && body.messages[0].content.includes('planning module')) return { message: text('<think>ok</think>{"title":"T","steps":["do it"]}') };

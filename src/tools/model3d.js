@@ -239,7 +239,9 @@ function buildGlb(spec) {
     for (let i = 0; i < g.pos.length; i += 3) for (let k = 0; k < 3; k++) { mn[k] = Math.min(mn[k], g.pos[i + k]); mx[k] = Math.max(mx[k], g.pos[i + k]); }
     const q = quat(p.rotation);
     const local = worldBox(q, [0, 0, 0], mn, mx);
-    if (p.on) {
+    if (p.on && /^(ground|floor)$/i.test(p.on) && !boxes.has(p.on)) {
+      p.position = [p.position[0], -local.min[1], p.position[2]]; // "on": "ground" stands the part on y = 0
+    } else if (p.on) {
       // "on": rest this part on top of an earlier one; x and z become offsets from that part's centre.
       const base = boxes.get(p.on);
       if (!base) throw new Error(`Part "${p.name}": "on" names "${p.on}", but no earlier part has that name. List the part it rests on first.`);
@@ -274,8 +276,8 @@ function buildGlb(spec) {
   }
   const rootName = String(spec.name || 'model').slice(0, 60);
   const root = { name: rootName, children: nodes.map((_, i) => i) };
-  // Stand the model on the ground: lift it if any part goes below y = 0.
-  const lift = lo[1] < 0 ? -lo[1] : 0;
+  // Stand the model on the ground: lift it if any part goes below y = 0, drop it if it all hovers above.
+  const lift = Math.abs(lo[1]) > 1e-6 ? -lo[1] : 0;
   if (lift) {
     root.translation = [0, lift, 0];
     lo[1] += lift; hi[1] += lift;
