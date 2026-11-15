@@ -231,6 +231,9 @@ class BrowserSession {
       if (!moving && later.game && later.game.state === 'play' && end.game && later.game.time === end.game.time) watch.push('The game says it is playing but its clock and screen stopped. Is the game loop still running (requestAnimationFrame called every frame)?');
       const quick = seen.map((l) => l.game).find((gm) => gm && gm.state === 'over' && Number(gm.time) < 1.5);
       if (quick) watch.push(`A round ended after only ${quick.time} s with score ${quick.score}. If the player did nothing wrong, it dies too fast: check the collision code, starting positions and gravity.`);
+      const moveKeys = inputs.some((d) => /^(key|press|hold|tap)\s+(Arrow\w+|Key[WASD])\b/i.test(d));
+      const spots = seen.map((l) => l.game && l.game.state === 'play' && l.game.player).filter(Boolean).map((p) => JSON.stringify(p));
+      if (moveKeys && spots.length > 1 && new Set(spots).size === 1) watch.push(`The player stayed at ${spots[0]} through all the movement keys. Check that update() changes g.player (or its vel before Kit.move) from Kit.moveInput() or Kit.down(...).`);
       if (timeline.some((t) => /FAILED/.test(t))) watch.push('Some inputs failed; see the timeline.');
       // Report workspace paths ("./assets/x.glb") instead of long preview URLs.
       const dir = url.slice(0, url.lastIndexOf('/') + 1);
@@ -292,6 +295,9 @@ HINTS.push(
   [/Invalid or unexpected token|Unexpected token|missing \) after|Unexpected end of input/, 'HOW TO FIX: a .js file has a syntax error, so none of it ran. Often a literal \\n was written into the code, or a quote or bracket is unclosed. file_read the file, find the broken line and fix it (file_write the whole file if that is easier).'],
   [/Identifier '(\w+)' has already been declared/, 'HOW TO FIX: the same const/let name is declared twice in one file. Delete one of the declarations.'],
   [/ReferenceError: (?!THREE\b)\w+ is not defined/, 'HOW TO FIX: a name is used but never declared. file_read the file at the line in the error and look for the line that should declare it: it may be missing, misspelled, or commented out with // (a commented-out line does not run).'],
+  [/does not provide an export named|Kit is not defined/, 'HOW TO FIX: a 3D game.js must start with: import { Kit, THREE } from \'./kit3d.js\'; (a 2D game loads kit.js with a plain <script> tag instead and has no import).'],
+  [/Kit\.(\w+) is not a function/, 'HOW TO FIX: that Kit helper does not exist. kit3d.js has: box, sphere, cylinder, cone, gem, ring, group, ground, model, add, remove, solid, move, moveInput, face, walk, near, hit, aim, hud, addScore, gameOver, sfx, burst, shake, down, pressed, rand, clamp. kit.js (2D) has: start, down, pressed, overlap, addScore, gameOver, sfx, image, drawImage, burst, shake, rand, clamp.'],
+  [/reading 'position'|reading 'rotation'|reading 'vel'/, 'HOW TO FIX: something is used before it exists. In a 3D game set g.player in init(g), and give objects you move with Kit.move a velocity first: obj.vel = new THREE.Vector3().'],
   [/\bg\.(pressed|down|overlap|addScore|gameOver|sfx|image|drawImage|burst|shake|rand|clamp) is not a function/, 'HOW TO FIX: the helpers belong to Kit, not g. Write Kit.pressed(...), Kit.down(...), Kit.overlap(...), Kit.addScore(...), Kit.gameOver(), Kit.sfx(...).'],
 );
 function hintsFor(text) { return HINTS.filter(([re]) => re.test(text)).map(([, hint]) => hint); }

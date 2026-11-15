@@ -31,7 +31,7 @@ Given the user's request, reply with ONLY a JSON object, no other text:
 - If it is a simple question or chat that needs no tools: {"title": "<3-6 word title>", "answer": "<your complete answer in Markdown>"}.
 Prefer the fewest steps that get a verified result. Do not include a "write the final answer" step; finishing is automatic.
 Games: start with "Start from the <${Object.keys(TEMPLATES).join('|')}> game_template", then steps that change game.js to fit the request (rules, looks, sprites with make_sprite, 3D models with make_model), then end with "Play-test with play_test and fix everything it reports". Do not plan web searches for how to code a game; the templates are better.
-If the request says a game template is already installed, do not plan to start one: plan only the changes the request asks for (look, sprites, rules, numbers in TUNING), then the play-test. A request that only names a game ("make snake") needs no rule changes: plan a sprite or look change and the play-test.
+If the request says a game template is already installed, do not plan to start one: plan only the changes the request asks for (look, sprites, rules, numbers in TUNING), then the play-test. A request that only names a game ("make snake") needs no rule changes: plan a sprite or look change (a model with make_model for 3D) and the play-test.
 ${effort.work}`;
 }
 
@@ -53,11 +53,13 @@ function systemPrompt({ plan, mode, tools, effort, files }) {
     '',
     'Games, 3D and web pages:',
     `- New game? Call game_template first (${Object.keys(TEMPLATES).join(', ')}). It writes a working game; then edit game.js with file_edit to fit the request. Do not write a game loop from scratch and do not copy games from the web.`,
-    '- Need a feature the template lacks (lives, power-ups, coins, sprite animation, levels, a timer, enemies that chase)? game_recipe gives tested code for kit.js games; paste it in with file_edit.',
+    '- Need a feature the template lacks (lives, power-ups, coins, enemies that chase, shooting, moving platforms, levels, a timer)? game_recipe gives tested code for both 2D and 3D games; paste it in with file_edit.',
+    '- 3D games (templates starting with 3d) run on kit3d.js: game.js does `import { Kit, THREE } from \'./kit3d.js\'`, init(g) builds the world and sets g.player, update(g, dt) moves things. Shapes stand on their y: Kit.box(w, h, d, color, x, y, z), Kit.sphere, Kit.cylinder, Kit.cone, Kit.gem; Kit.model(\'assets/x.glb\', fallbackShape) for models; Kit.moveInput(), Kit.move(obj, dt) for walking with gravity and walls (Kit.solid(obj)), Kit.near(a, b, dist) and Kit.hit(a, b) for touching, Kit.hud(text) for info. Never rewrite kit3d.js.',
+    '- 3D looks: the 3D templates load assets/player.glb (and assets/enemy.glb). To change how the player or enemies look, make_model to that same path: no code change needed. Parts named leg_l, leg_r, arm_l, arm_r swing when the hero walks.',
     '- Build them as files in the workspace: index.html plus .js/.css files and an assets/ folder. Use relative paths ("./assets/tree.glb") so they run anywhere.',
     '- 2D art: draw sprites with make_sprite (pixel art saved as PNG) and load them with Kit.image. The flyer, runner and shooter templates already draw the player from assets/player.png, so make_sprite to that path changes its look with no code change. Sound effects: Kit.sfx("jump" | "coin" | "hit" | "boom" | "power").',
     '- Bugs small models often write: an obstacle pair checked with || so the player dies at once; score added every frame instead of once per obstacle; a second game loop started on restart; listeners added inside functions that run again; drawing an object at a different place than its hitbox; a start button the inputs never reach. Check for these when a game misbehaves.',
-    '- For 3D use three.js from a CDN with an import map: {"imports": {"three": "https://unpkg.com/three@0.180.0/build/three.module.js", "three/addons/": "https://unpkg.com/three@0.180.0/examples/jsm/"}}. Load models with GLTFLoader (and OBJLoader/FBXLoader for those formats). For 2D, a plain <canvas> is enough.',
+    '- 3D outside the templates: three.js from a CDN with an import map: {"imports": {"three": "https://unpkg.com/three@0.180.0/build/three.module.js", "three/addons/": "https://unpkg.com/three@0.180.0/examples/jsm/"}}. Load models with GLTFLoader (and OBJLoader/FBXLoader for those formats). For 2D, a plain <canvas> is enough.',
     '- Need a model nobody gave you? Make it with make_model (low-poly shapes, saved as .glb). Models the user attached are in assets/; run model_info on them first to learn their size and animation names.',
     '- Test like a player: after writing or changing a game, run play_test (with inputs such as "click Start", "key Space", "tap Space 8 350", "key ArrowRight 800") and read "What happened", the game state and WATCH OUT, not just Errors. Fix what it reports, then test again. Do not finish while play_test still shows errors or warnings.',
     '- Only say you fixed or changed something after a file_write or file_edit actually did it. Reading code and testing is not fixing.',
@@ -251,13 +253,26 @@ class Agent {
    * Returns an error for a file_write that would throw the kit away, or null.
    */
   guardWrite(call) {
-    if (call.name !== 'file_write' || !fs.existsSync(path.join(this.workspace, 'kit.js'))) return null;
+    if (['web_search', 'web_fetch', 'browser'].includes(call.name) && this.isKitGame()) {
+      const asked = JSON.stringify(call.args || {});
+      if (/\b(models?|glb|gltf|obj|fbx|sprites?|assets?|textures?|download|sketchfab|3d|png)\b/i.test(asked)) {
+        return 'Models and art for this game are made here, not downloaded (download sites need a login and the files never arrive). Make a 3D model with make_model, or a sprite with make_sprite, saved in assets/. To restyle the player or enemies, make_model to assets/player.glb or assets/enemy.glb.';
+      }
+    }
+    if (call.name !== 'file_write') return null;
+    const three = fs.existsSync(path.join(this.workspace, 'kit3d.js'));
+    if (!three && !fs.existsSync(path.join(this.workspace, 'kit.js'))) return null;
+    const engine = three ? 'kit3d.js' : 'kit.js';
     const file = String((call.args && call.args.path) || '').replace(/^\.\//, '');
     const text = String((call.args && call.args.content) || '');
-    if (file === 'kit.js') return 'kit.js is the tested engine; do not rewrite it. Change game.js instead, with small file_edit calls.';
-    if (/^index\.html?$/i.test(file) && !/kit\.js/.test(text)) return 'This index.html no longer loads kit.js and game.js, so it would throw away the working game. Keep index.html as it is and change game.js with file_edit.';
+    if (file === engine) return `${engine} is the tested engine; do not rewrite it. Change game.js instead, with small file_edit calls.`;
+    if (/^index\.html?$/i.test(file) && !(three ? /game\.js/.test(text) && /importmap/.test(text) : /kit\.js/.test(text))) return `This index.html no longer loads ${three ? 'game.js with the three.js import map' : 'kit.js and game.js'}, so it would throw away the working game. Keep index.html as it is and change game.js with file_edit.`;
     if (file === 'game.js' && !/Kit\.start\s*\(/.test(text)) return 'This game.js does not call Kit.start, so the game would not run. Change the existing game.js with small file_edit calls instead of rewriting it (file_read it first if you need the exact text).';
     return null;
+  }
+
+  isKitGame() {
+    return ['kit.js', 'kit3d.js'].some((f) => fs.existsSync(path.join(this.workspace, f)));
   }
 
   async decide() {

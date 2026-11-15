@@ -6,7 +6,7 @@ const path = require('path');
 
 const src = path.join(path.dirname(path.dirname(require.resolve('three'))), 'examples', 'jsm');
 const out = path.join(__dirname, '..', 'vendor', 'three-addons');
-const entries = ['controls/OrbitControls.js', 'loaders/GLTFLoader.js', 'loaders/OBJLoader.js', 'loaders/FBXLoader.js', 'loaders/STLLoader.js'];
+const entries = ['controls/OrbitControls.js', 'loaders/GLTFLoader.js', 'loaders/OBJLoader.js', 'loaders/FBXLoader.js', 'loaders/STLLoader.js', 'utils/SkeletonUtils.js'];
 
 fs.rmSync(out, { recursive: true, force: true });
 const seen = new Set();

@@ -6,7 +6,7 @@ const { webSearch, fetchPage } = require('./web');
 const { runCommand, runPython } = require('./exec');
 const { buildGlb, modelInfo, SHAPES } = require('./model3d');
 const { previewUrl } = require('../server/preview');
-const { TEMPLATES, RECIPES, installTemplate, makeSprite } = require('./gamekit');
+const { TEMPLATES, RECIPES, RECIPES_3D, installTemplate, makeSprite } = require('./gamekit');
 const { recipeText } = require('./gamekit/recipes');
 
 /**
@@ -231,30 +231,34 @@ function buildTools() {
       description:
         'Start a game from a tested starter that already works (title screen, game loop, controls, collisions, score, game over, restart, sounds, high score). ' +
         `Templates: ${Object.entries(TEMPLATES).map(([k, t]) => `"${k}" (${t.about})`).join('; ')}. ` +
-        'Use it first for any new game, then change game.js (or main.js for 3d) to match the request: rules, numbers in TUNING, drawing, sprites. Much safer than writing a game from scratch.',
+        'Use it first for any new game, then change game.js to match the request: rules, numbers in TUNING, looks, sprites or models. Much safer than writing a game from scratch.',
       parameters: obj({ template: { type: 'string', enum: Object.keys(TEMPLATES) }, title: str('game title shown on the title screen'), overwrite: { type: 'boolean', description: 'replace existing index.html/game files' } }, ['template']),
       label: (a) => `Starting from the ${a.template} game template`,
       async run(a, ctx) {
         const kind = String(a.template || '');
         const files = installTemplate(ctx.workspace, kind, { title: a.title, overwrite: !!a.overwrite });
         for (const f of files) ctx.emit('file', { path: f });
-        const main = kind === '3d' ? 'main.js' : 'game.js';
-        const text = fs.readFileSync(path.join(ctx.workspace, main), 'utf8');
-        return `Wrote ${files.join(', ')}. This is a working game; play_test it, then change ${main} to fit the request. ` +
-          (kind === '3d' ? '' : 'Do not edit kit.js: it runs the loop, input, title and game-over screens. In game.js, init() resets a round, update(g, dt) moves things (dt in seconds), draw(g, ctx) draws. Kit.gameOver() ends a round; Kit.addScore(n) scores. ') +
-          `\n\n${main}:\n${truncate(text, 7000)}`;
+        const text = fs.readFileSync(path.join(ctx.workspace, 'game.js'), 'utf8');
+        return `Wrote ${files.join(', ')}. This is a working game; play_test it, then change game.js to fit the request. ` +
+          (TEMPLATES[kind].three
+            ? 'Do not edit kit3d.js: it runs three.js, the loop, input, camera, physics, title and game-over screens. In game.js, init(g) builds the world and g.player for a round, update(g, dt) moves things. Shapes stand on their y (y = 0 is the ground). To change how the player or enemies look, make_model to assets/player.glb or assets/enemy.glb (no code change). '
+            : 'Do not edit kit.js: it runs the loop, input, title and game-over screens. In game.js, init() resets a round, update(g, dt) moves things (dt in seconds), draw(g, ctx) draws. ') +
+          'Kit.gameOver() ends a round; Kit.addScore(n) scores.' +
+          `\n\ngame.js:\n${truncate(text, 7000)}`;
       },
     },
     {
       name: 'game_recipe',
       icon: 'book-open',
       description:
-        'Tested code to add a feature to a kit.js game, in four parts (top of game.js, init, update, draw) to paste in with file_edit. ' +
-        `Recipes: ${Object.entries(RECIPES).map(([k, r]) => `"${k}" (${r.about})`).join('; ')}.`,
-      parameters: obj({ recipe: { type: 'string', enum: Object.keys(RECIPES) } }, ['recipe']),
+        'Tested code to add a feature to a game made from a template, in parts (top of game.js, init, update, and draw for 2D) to paste in with file_edit. ' +
+        'It picks the 2D or 3D version for the game in the workspace. ' +
+        `2D recipes: ${Object.entries(RECIPES).map(([k, r]) => `"${k}" (${r.about})`).join('; ')}. ` +
+        `3D recipes: ${Object.entries(RECIPES_3D).map(([k, r]) => `"${k}" (${r.about})`).join('; ')}.`,
+      parameters: obj({ recipe: { type: 'string', enum: [...new Set([...Object.keys(RECIPES), ...Object.keys(RECIPES_3D)])] } }, ['recipe']),
       label: (a) => `Looking up the ${a.recipe} recipe`,
-      async run(a) {
-        return recipeText(String(a.recipe || ''));
+      async run(a, ctx) {
+        return recipeText(String(a.recipe || ''), fs.existsSync(path.join(ctx.workspace, 'kit3d.js')));
       },
     },
     {

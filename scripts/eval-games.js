@@ -25,6 +25,10 @@ const CASES = {
   snake: { ask: 'make a snake game', inputs: ['key ArrowUp 100', 'wait 800', 'key ArrowLeft 100', 'wait 800'] },
   breakout: { ask: 'make a breakout game with colourful bricks', inputs: ['key ArrowLeft 600', 'key ArrowRight 900'] },
   shooter: { ask: 'make a space shooter', inputs: ['key ArrowLeft 500', 'key Space', 'key Space', 'key ArrowRight 700'] },
+  adventure3d: { ask: 'make a 3d game where a knight collects gold coins', inputs: ['key KeyW 1200', 'key Space', 'key KeyD 800'] },
+  platformer3d: { ask: 'make a 3d platformer with a robot', inputs: ['key KeyW 500', 'key Space', 'key KeyW 400'] },
+  fps: { ask: 'make a first person shooter with zombies', inputs: ['key KeyW 800', 'key ArrowLeft 400', 'key Enter', 'key Enter'] },
+  racer: { ask: 'make a racing game with a red sports car', inputs: ['key ArrowUp 2000', 'key ArrowLeft 500'] },
 };
 
 function settings() {
@@ -51,7 +55,7 @@ async function grade(workspace, inputs) {
     const state = m ? JSON.parse(m[1]) : null;
     out.started = state ? state.state !== 'title' : /changed/i.test(text);
     out.survived = state ? state.state === 'play' || (state.time || 0) > 2 : !/game over/i.test(text);
-    out.reacts = /screen changed|moved|changed a lot/i.test(text);
+    out.reacts = /screen changed|moved|changed a lot/i.test(text) && !/stayed at .* through all the movement keys/.test(text);
     out.score = state ? state.score : null;
     out.notes = text.slice(0, 1500);
   } catch (e) {

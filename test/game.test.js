@@ -278,8 +278,39 @@ test('game_template writes a working starter and will not overwrite a game by ac
 
   const ws3 = fs.mkdtempSync(path.join(home, 'ws-'));
   await tool('game_template').run({ template: '3d' }, ctxFor(ws3).ctx);
-  assert.ok(fs.existsSync(path.join(ws3, 'assets/player.glb')), 'the 3d template ships the model it loads');
-  assert.match(fs.readFileSync(path.join(ws3, 'index.html'), 'utf8'), /importmap/);
+  assert.ok(fs.existsSync(path.join(ws3, 'assets/player.glb')), 'the 3d template ships the models it loads');
+  assert.ok(fs.existsSync(path.join(ws3, 'assets/enemy.glb')));
+  assert.match(fs.readFileSync(path.join(ws3, 'index.html'), 'utf8'), /importmap[\s\S]*type="module" src="game\.js"/);
+});
+
+test('every 3D template is a kit3d.js game with the models it loads', () => {
+  const { TEMPLATES, installTemplate } = require('../src/tools/gamekit');
+  const kinds = Object.keys(TEMPLATES).filter((k) => TEMPLATES[k].three);
+  assert.ok(kinds.length >= 7);
+  for (const kind of kinds) {
+    const ws = fs.mkdtempSync(path.join(home, 'ws-'));
+    installTemplate(ws, kind, { title: kind });
+    const game = fs.readFileSync(path.join(ws, 'game.js'), 'utf8');
+    assert.match(game, /import \{ Kit, THREE \} from '\.\/kit3d\.js'/, kind);
+    assert.match(game, /Kit\.start\(/, kind);
+    assert.match(game, /const TUNING/, kind);
+    for (const m of game.matchAll(/'(assets\/\w+\.glb)'/g)) assert.ok(fs.existsSync(path.join(ws, m[1])), `${kind} ships ${m[1]}`);
+  }
+  // kit3d.js parses as a module (it imports three, so only check the syntax here; scripts/check-3d.js plays them)
+  const src = fs.readFileSync(require.resolve('../src/tools/gamekit/kit3d.js'), 'utf8');
+  assert.doesNotThrow(() => new Function(src.replace(/^import .*$/gm, '').replace(/^export (const|\{[^}]*\};)/gm, (m, k) => (k === 'const' ? 'const' : ''))));
+});
+
+test('game_recipe gives the 3D version in a 3D game', async () => {
+  const ws = fs.mkdtempSync(path.join(home, 'ws-'));
+  const { ctx } = ctxFor(ws);
+  assert.match(await tool('game_recipe').run({ recipe: 'coins' }, ctx), /ctx\.ellipse/);
+  require('../src/tools/gamekit').installTemplate(ws, '3d-blank');
+  const three = await tool('game_recipe').run({ recipe: 'coins' }, ctx);
+  assert.match(three, /kit3d\.js game/);
+  assert.match(three, /Kit\.cylinder/);
+  assert.match(await tool('game_recipe').run({ recipe: 'shooting' }, ctx), /Kit\.sphere/);
+  await assert.rejects(tool('game_recipe').run({ recipe: 'shooting' }, ctxFor(fs.mkdtempSync(path.join(home, 'ws-'))).ctx), /Unknown recipe "shooting"/);
 });
 
 test('make_sprite saves a PNG, makes sprite sheets and reports colours missing from the palette', async () => {
@@ -306,7 +337,13 @@ test('genres: a request for a new game picks a template and a title', () => {
     'make a space shooter': 'shooter',
     'make me an endless runner game': 'runner',
     'make a platformer where a fox collects gems': 'platformer',
-    'make a 3d racing game': '3d',
+    'make a 3d racing game': '3d-racer',
+    'make a racing game with a red car': '3d-racer',
+    'make a first person shooter with zombies': '3d-fps',
+    'make a 3d platformer with a robot': '3d-platformer',
+    'make a 3d endless runner': '3d-runner',
+    'make a 3d plane game': '3d-flyer',
+    'make a 3d game where a knight collects coins': '3d',
     'make a game where you dodge falling rocks': 'topdown',
     'what is the capital of france': null,
     'fix the game so the bird flies higher': null,
@@ -316,6 +353,8 @@ test('genres: a request for a new game picks a template and a title', () => {
   assert.equal(gameTitle('make flappy bird'), 'Flappy Bird');
   assert.equal(gameTitle('build an endless runner game'), 'Endless Runner');
   assert.equal(gameTitle('make a platformer where a fox collects gems'), 'Platformer');
+  assert.equal(gameTitle('make a 3d game where a knight collects gold coins'), 'Knight Collects Gold Coins');
+  assert.equal(gameTitle('make a fps game'), 'FPS');
 });
 
 test('agent starts a known kind of game from its template before the model acts', async () => {
@@ -353,6 +392,18 @@ test('agent refuses a file_write that would throw away a working kit game', asyn
   assert.equal(w('game.js', 'Kit.start({ init, update, draw });'), null);
   assert.equal(w('notes.md', 'hi'), null);
   assert.equal(agent.guardWrite({ name: 'file_edit', args: { path: 'kit.js' } }), null);
+
+  const ws3 = fs.mkdtempSync(path.join(home, 'ws-'));
+  require('../src/tools/gamekit').installTemplate(ws3, '3d-fps');
+  const agent3 = new Agent({ settings: settingsFor('http://127.0.0.1:1'), workspace: ws3, signal: new AbortController().signal, history: [], emit: () => {}, ask: async () => '', approve: async () => true });
+  const w3 = (p, content) => agent3.guardWrite({ name: 'file_write', args: { path: p, content } });
+  assert.match(w3('kit3d.js', '//'), /kit3d\.js is the tested engine/);
+  assert.match(w3('index.html', '<html><script type="module">import * as THREE from "three";</script></html>'), /throw away the working game/);
+  assert.match(w3('game.js', 'const scene = new THREE.Scene();'), /does not call Kit\.start/);
+  assert.equal(w3('game.js', "import { Kit, THREE } from './kit3d.js';\nKit.start({ init, update });"), null);
+  assert.match(agent3.guardWrite({ name: 'web_search', args: { query: 'free gold coin glb model download' } }), /make_model/);
+  assert.equal(agent3.guardWrite({ name: 'web_search', args: { query: 'how fast does a cheetah run' } }), null);
+  assert.equal(agent.guardWrite({ name: 'web_fetch', args: { url: 'https://example.com/a.png' } }) === null, false);
 });
 
 test('every game recipe runs inside a kit game without errors', () => {

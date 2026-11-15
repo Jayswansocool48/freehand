@@ -194,11 +194,205 @@ for (const s of specks) ctx.fillRect(s.x, s.y, s.size, s.size);`,
   },
 };
 
-/** One recipe as text the model can paste in, section by section. */
-function recipeText(name) {
-  const r = RECIPES[name];
-  if (!r) throw new Error(`Unknown recipe "${name}". Choose one of: ${Object.keys(RECIPES).join(', ')}.`);
+/*
+ * The same idea for kit3d.js games: code for three places in game.js (the top, init() and update()).
+ * They use g.player. scripts/check-3d.js plays every one inside the blank 3D template in a real browser.
+ */
+const RECIPES_3D = {
+  lives: {
+    about: 'three lives with a blinking safe time after each hit; call hurt() where the game used to end the round',
+    top: `let lives;
+let hurtTimer;
+// Call hurt() when something hits the player, instead of Kit.gameOver().
+function hurt() {
+  if (hurtTimer > 0) return;
+  lives -= 1;
+  hurtTimer = 1.5;
+  Kit.sfx('hit');
+  Kit.shake(0.3);
+  if (lives <= 0) Kit.gameOver();
+}`,
+    init: `lives = 3;
+hurtTimer = 0;`,
+    update: `hurtTimer -= dt;
+g.player.visible = hurtTimer <= 0 || Math.floor(g.time * 10) % 2 === 0;
+Kit.hud('Lives ' + lives, 'lives');`,
+  },
+
+  coins: {
+    about: 'spinning coins around the player that score when touched; new ones keep appearing',
+    top: `let coins;
+function addCoin(g) {
+  const p = g.player.position;
+  const c = Kit.cylinder(0.35, 0.08, '#ffc83d', p.x + Kit.rand(-15, 15), 0.8, p.z + Kit.rand(-15, 15));
+  c.rotation.z = Math.PI / 2;
+  coins.push(c);
+}`,
+    init: `coins = [];
+for (let i = 0; i < 8; i++) addCoin(g);`,
+    update: `for (const c of coins) {
+  c.rotation.y += dt * 3;
+  if (!c.taken && Kit.near(g.player, c, 1.4)) {
+    c.taken = true;
+    Kit.remove(c);
+    Kit.addScore(1);
+    Kit.sfx('coin');
+    Kit.burst(c.position, '#ffc83d');
+  }
+}
+coins = coins.filter((c) => !c.taken);
+if (coins.length < 4) addCoin(g);`,
+  },
+
+  chaser: {
+    about: 'enemies (assets/enemy.glb, a red ball until it exists) that appear around the player and chase it; touching one calls hurt() from the lives recipe, or ends the round',
+    top: `let chasers;
+let chaserTimer;
+function addChaser(g) {
+  const a = Kit.rand(0, Math.PI * 2);
+  const e = Kit.model('assets/enemy.glb', Kit.shape.sphere(0.5, '#e53935'));
+  e.position.set(g.player.position.x + Math.cos(a) * 18, 0, g.player.position.z + Math.sin(a) * 18);
+  e.size = { w: 0.9, h: 0.9, d: 0.9 };
+  e.vel = new THREE.Vector3();
+  chasers.push(e);
+}`,
+    init: `chasers = [];
+chaserTimer = 2;`,
+    update: `chaserTimer -= dt;
+if (chaserTimer <= 0 && chasers.length < 8) { addChaser(g); chaserTimer = 4; }
+for (const e of chasers) {
+  const to = new THREE.Vector3(g.player.position.x - e.position.x, 0, g.player.position.z - e.position.z).normalize();
+  e.vel.x = to.x * 3;
+  e.vel.z = to.z * 3;
+  Kit.move(e, dt);
+  Kit.face(e, to, dt);
+}
+if (chasers.some((e) => Kit.near(g.player, e, 1.1))) {
+  if (typeof hurt === 'function') hurt(); else Kit.gameOver();
+}`,
+  },
+
+  shooting: {
+    about: 'click, Enter or F fires balls the way the player faces; they defeat chasers (from the chaser recipe) and score',
+    top: `let shots;
+let shotTimer;
+// What the shots can hit: the chasers from the chaser recipe. Return your own enemy list here instead.
+function targets() { return typeof chasers !== 'undefined' ? chasers : []; }`,
+    init: `shots = [];
+shotTimer = 0;`,
+    update: `shotTimer -= dt;
+if (Kit.down('action') && shotTimer <= 0) {
+  shotTimer = 0.25;
+  const p = g.player;
+  const s = Kit.sphere(0.15, '#ffeb3b', p.position.x, p.position.y + 1, p.position.z);
+  s.vel = new THREE.Vector3(Math.sin(p.rotation.y), 0, Math.cos(p.rotation.y)).multiplyScalar(25); // models face +z
+  s.life = 1.5;
+  shots.push(s);
+  Kit.sfx('shoot');
+}
+for (const s of shots) {
+  s.position.addScaledVector(s.vel, dt);
+  s.life -= dt;
+  const t = targets().find((e) => !e.dead && Kit.near(s, e, 1.3));
+  if (t) {
+    t.dead = true;
+    Kit.remove(t);
+    Kit.addScore(1);
+    Kit.sfx('boom');
+    Kit.burst(t.position, '#ff7043');
+    s.life = 0;
+  }
+}
+shots = shots.filter((s) => { if (s.life > 0) return true; Kit.remove(s); return false; });
+if (typeof chasers !== 'undefined') chasers = chasers.filter((e) => !e.dead);`,
+  },
+
+  moving_platforms: {
+    about: 'platforms that slide and bob; the player rides them (they are solid)',
+    top: `let movers;`,
+    init: `movers = [];
+for (let i = 0; i < 3; i++) {
+  const m = Kit.box(3, 0.5, 3, '#ff8a65', -6 + i * 6, 1 + i, -10 - i * 4);
+  m.base = m.position.clone();
+  m.phase = i * 2;
+  Kit.solid(m, true); // true = it moves
+  movers.push(m);
+}`,
+    update: `for (const m of movers) {
+  m.position.x = m.base.x + Math.sin(g.time * 0.8 + m.phase) * 3;
+  m.position.y = m.base.y + Math.sin(g.time * 1.2 + m.phase) * 0.8;
+}`,
+  },
+
+  timer: {
+    about: 'a countdown on screen; at zero the round ends with "Time up!" and the score stays',
+    top: `const TIME_LIMIT = 60; // seconds
+let timeLeft;`,
+    init: `timeLeft = TIME_LIMIT;`,
+    update: `timeLeft -= dt;
+if (timeLeft <= 0) { timeLeft = 0; Kit.gameOver('Time up!'); }
+Kit.hud('Time ' + Math.ceil(timeLeft), 'timer');`,
+  },
+
+  powerup: {
+    about: 'a speed-boost gem appears now and then; touching it makes boostTime > 0 for 5 seconds (multiply the speed by boostTime > 0 ? 1.8 : 1)',
+    top: `let boost;
+let boostTime;
+let boostTimer;`,
+    init: `boost = null;
+boostTime = 0;
+boostTimer = 5;`,
+    update: `boostTimer -= dt;
+if (!boost && boostTimer <= 0) boost = Kit.gem(0.5, '#29b6f6', g.player.position.x + Kit.rand(-10, 10), 0.5, g.player.position.z + Kit.rand(-10, 10));
+if (boost) {
+  boost.rotation.y += dt * 3;
+  if (Kit.near(g.player, boost, 1.5)) { Kit.remove(boost); boost = null; boostTimer = Kit.rand(8, 14); boostTime = 5; Kit.sfx('power'); }
+}
+boostTime = Math.max(0, boostTime - dt);
+Kit.hud(boostTime > 0 ? 'Speed boost ' + Math.ceil(boostTime) : '', 'boost');
+// Where the game sets the player's speed, use: TUNING.speed * (boostTime > 0 ? 1.8 : 1)`,
+  },
+
+  levels: {
+    about: 'a level number that goes up every 10 points with a sound; multiply speeds by levelSpeed() to make it harder',
+    top: `const POINTS_PER_LEVEL = 10;
+let level;
+// Multiply speeds by this to make each level harder, e.g. TUNING.enemySpeed * levelSpeed()
+function levelSpeed() { return 1 + (level - 1) * 0.15; }`,
+    init: `level = 1;`,
+    update: `const nextLevel = 1 + Math.floor(g.score / POINTS_PER_LEVEL);
+if (nextLevel > level) { level = nextLevel; Kit.sfx('power'); }
+Kit.hud('Level ' + level, 'level');`,
+  },
+
+  scenery: {
+    about: 'copies of a model made with make_model (trees, houses, rocks) placed around the world as solid scenery',
+    top: `// Make the model first, e.g. make_model {"name": "tree", "path": "assets/tree.glb", "parts": [...]}
+const SCENERY = 'assets/tree.glb';`,
+    init: `for (let i = 0; i < 12; i++) {
+  const s = Kit.model(SCENERY, Kit.shape.cone(1, 2.5, '#2e7d32'));
+  s.position.set(Kit.rand(-25, 25), 0, Kit.rand(-25, 25));
+  if (s.position.length() < 5) s.position.x += 8; // keep the start clear
+  s.rotation.y = Kit.rand(0, Math.PI * 2);
+  Kit.solid(s);
+}`,
+    update: ``,
+  },
+};
+
+/** One recipe as text the model can paste in, part by part. */
+function recipeText(name, three = false) {
+  const set = three ? RECIPES_3D : RECIPES;
+  const r = set[name];
+  if (!r) throw new Error(`Unknown ${three ? '3D ' : ''}recipe "${name}". Choose one of: ${Object.keys(set).join(', ')}.`);
   const part = (title, code) => (code ? `\n--- ${title} ---\n${code}\n` : '');
+  if (three) {
+    return `Recipe "${name}" for this kit3d.js game: ${r.about}.\nPaste each part into game.js with file_edit. It uses g.player.\n` +
+      part('1. top of game.js, after the other let/const lines', r.top) +
+      part('2. inside init(g), at the end (after g.player is made)', r.init) +
+      part('3. inside update(g, dt), at the end', r.update) +
+      '\nThen play_test.';
+  }
   return `Recipe "${name}": ${r.about}.\nPaste each part into game.js with file_edit. It uses \`player\`; if your hero has another name (ship, hero, paddle), use that name.\n` +
     part('1. top of game.js, after the other let/const lines', r.top) +
     part('2. inside init(g), at the end', r.init) +
@@ -207,4 +401,4 @@ function recipeText(name) {
     '\nThen play_test.';
 }
 
-module.exports = { RECIPES, recipeText };
+module.exports = { RECIPES, RECIPES_3D, recipeText };

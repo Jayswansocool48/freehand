@@ -13,7 +13,8 @@ const { buildGlb } = require('../model3d');
 
 const DIR = __dirname;
 
-// The 3d template's player: a small car facing +z (the way main.js drives).
+// Default 3D models for the 3D templates (all face +z, the way kit3d.js expects). A make_model call to the
+// same path (assets/player.glb, assets/enemy.glb) replaces one with no code change.
 const PLAYER_CAR = [
   { name: 'body', shape: 'box', size: [1, 0.4, 1.6], position: [0, 0.35, 0], color: '#3366ff', flat: true },
   { name: 'cabin', shape: 'box', size: [0.8, 0.35, 0.8], on: 'body', position: [0, 0, -0.1], color: '#dfe9ff', flat: true },
@@ -22,6 +23,45 @@ const PLAYER_CAR = [
   { name: 'wheel_bl', shape: 'cylinder', size: [0.3, 0.16, 0.3], position: [0.52, 0.15, -0.5], rotation: [0, 0, 90], color: '#222222' },
   { name: 'wheel_br', shape: 'cylinder', size: [0.3, 0.16, 0.3], position: [-0.52, 0.15, -0.5], rotation: [0, 0, 90], color: '#222222' },
 ];
+// Parts named leg_* and arm_* swing when the game calls Kit.walk.
+const PLAYER_HERO = [
+  { name: 'leg_l', shape: 'box', size: [0.26, 0.7, 0.3], position: [0.16, 0.35, 0], color: '#2d3e8f', flat: true },
+  { name: 'leg_r', shape: 'box', size: [0.26, 0.7, 0.3], position: [-0.16, 0.35, 0], color: '#2d3e8f', flat: true },
+  { name: 'body', shape: 'box', size: [0.68, 0.66, 0.4], position: [0, 1.03, 0], color: '#e8553b', flat: true },
+  { name: 'arm_l', shape: 'box', size: [0.2, 0.62, 0.24], position: [0.45, 1.04, 0], color: '#f2c79b', flat: true },
+  { name: 'arm_r', shape: 'box', size: [0.2, 0.62, 0.24], position: [-0.45, 1.04, 0], color: '#f2c79b', flat: true },
+  { name: 'head', shape: 'box', size: [0.5, 0.46, 0.46], position: [0, 1.59, 0], color: '#f2c79b', flat: true },
+  { name: 'hair', shape: 'box', size: [0.54, 0.14, 0.5], position: [0, 1.88, -0.02], color: '#5a3a22', flat: true },
+  { name: 'eye_l', shape: 'box', size: [0.08, 0.09, 0.04], position: [0.11, 1.62, 0.25], color: '#222222' },
+  { name: 'eye_r', shape: 'box', size: [0.08, 0.09, 0.04], position: [-0.11, 1.62, 0.25], color: '#222222' },
+];
+const ENEMY_SLIME = [
+  { name: 'body', shape: 'sphere', size: [1, 0.8, 1], position: [0, 0.4, 0], color: '#8e44ad', flat: true },
+  { name: 'eye_l', shape: 'sphere', size: [0.24, 0.24, 0.12], position: [0.18, 0.55, 0.45], color: '#ffffff' },
+  { name: 'eye_r', shape: 'sphere', size: [0.24, 0.24, 0.12], position: [-0.18, 0.55, 0.45], color: '#ffffff' },
+  { name: 'pupil_l', shape: 'box', size: [0.08, 0.1, 0.04], position: [0.18, 0.55, 0.52], color: '#111111' },
+  { name: 'pupil_r', shape: 'box', size: [0.08, 0.1, 0.04], position: [-0.18, 0.55, 0.52], color: '#111111' },
+  { name: 'horn_l', shape: 'cone', size: [0.16, 0.3, 0.16], position: [0.25, 0.86, 0], color: '#f1c40f', flat: true },
+  { name: 'horn_r', shape: 'cone', size: [0.16, 0.3, 0.16], position: [-0.25, 0.86, 0], color: '#f1c40f', flat: true },
+];
+const PLAYER_PLANE = [
+  { name: 'fuselage', shape: 'box', size: [0.6, 0.5, 2.2], position: [0, 0.5, 0], color: '#e74c3c', flat: true },
+  { name: 'nose', shape: 'cone', size: [0.5, 0.6, 0.5], position: [0, 0.5, 1.4], rotation: [90, 0, 0], color: '#f5f5f5', flat: true },
+  { name: 'wings', shape: 'box', size: [3, 0.1, 0.7], position: [0, 0.45, 0.1], color: '#f5f5f5', flat: true },
+  { name: 'cockpit', shape: 'box', size: [0.4, 0.3, 0.6], position: [0, 0.88, 0.35], color: '#9fe3ff', flat: true },
+  { name: 'tail_fin', shape: 'box', size: [0.1, 0.6, 0.5], position: [0, 1.0, -0.85], color: '#e74c3c', flat: true },
+  { name: 'tail_wing', shape: 'box', size: [1.2, 0.08, 0.4], position: [0, 0.55, -0.9], color: '#f5f5f5', flat: true },
+];
+// Which models each 3D template gets: assets path -> parts.
+const MODELS_3D = {
+  '3d': { player: PLAYER_HERO, enemy: ENEMY_SLIME },
+  '3d-platformer': { player: PLAYER_HERO },
+  '3d-fps': { enemy: ENEMY_SLIME },
+  '3d-racer': { player: PLAYER_CAR },
+  '3d-runner': { player: PLAYER_HERO },
+  '3d-flyer': { player: PLAYER_PLANE },
+  '3d-blank': { player: PLAYER_HERO, enemy: ENEMY_SLIME },
+};
 
 // Default player art for templates whose game.js draws assets/player.png. make_sprite on the same
 // path replaces it with no code change.
@@ -72,6 +112,8 @@ const PLAYER_SPRITES = {
     ] },
 };
 
+const THREE_FILES = ['index.html', 'kit3d.js', 'game.js'];
+
 const TEMPLATES = {
   flyer: { about: 'tap/Space to flap through gaps between obstacles (gravity, scrolling pipes or walls, score per gap passed)', files: ['index.html', 'kit.js', 'game.js'] },
   platformer: { about: 'side-scrolling run and jump: tile level, coins, stompable enemies, a goal flag', files: ['index.html', 'kit.js', 'game.js'] },
@@ -81,12 +123,19 @@ const TEMPLATES = {
   shooter: { about: 'vertical space shooter: move left and right, hold Space to fire at enemies falling from the top, 3 lives', files: ['index.html', 'kit.js', 'game.js'] },
   runner: { about: 'endless runner: the hero runs by itself, Space jumps (double jump) over obstacles, speeds up over time', files: ['index.html', 'kit.js', 'game.js'] },
   blank: { about: 'empty kit.js game (a box that moves) for any other 2D game: puzzles, card games, rhythm, racing', files: ['index.html', 'kit.js', 'game.js'] },
-  '3d': { about: 'three.js scene with a drivable player, collectibles, follow camera, and GLTF model loading with a fallback', files: ['index.html', 'main.js'], dir: 'three-3d' },
+  '3d': { about: '3D third-person adventure: walk and jump around an island, collect gems, slimes chase you, 3 lives', files: THREE_FILES, three: true, dir: 'three-3d' },
+  '3d-platformer': { about: '3D platformer: jump across floating and moving platforms, collect coins, reach the flag, falling costs a life', files: THREE_FILES, three: true },
+  '3d-fps': { about: '3D first-person shooter: arena with walls, mouse/arrow look, click or Enter to shoot enemies that come in waves, health', files: THREE_FILES, three: true },
+  '3d-racer': { about: '3D racing: drive a car round a track through checkpoints, 3 laps against the clock, cones to avoid, off-road is slow', files: THREE_FILES, three: true },
+  '3d-runner': { about: '3D endless runner: 3 lanes, left/right to switch lanes, Space jumps barriers, dodge walls, collect coins, speeds up', files: THREE_FILES, three: true },
+  '3d-flyer': { about: '3D flying: a plane flies forward, arrows steer, fly through rings for points, dodge floating rocks, 3 lives', files: THREE_FILES, three: true },
+  '3d-blank': { about: 'empty kit3d.js game (a character that walks and jumps on a ground) for any other 3D game', files: THREE_FILES, three: true },
 };
 
 function source(kind, file) {
   const own = path.join(DIR, 'templates', TEMPLATES[kind].dir || kind, file);
-  return fs.existsSync(own) ? own : path.join(DIR, file);
+  if (fs.existsSync(own)) return own;
+  return path.join(DIR, TEMPLATES[kind].three && file === 'index.html' ? 'index3d.html' : file);
 }
 
 /** Copies a starter game into the workspace. Returns the list of files written. */
@@ -110,10 +159,12 @@ function installTemplate(workspace, kind, { title = 'My Game', overwrite = false
     fs.writeFileSync(path.join(workspace, 'assets', 'player.png'), makeSprite(PLAYER_SPRITES[kind]).png);
     written.push('assets/player.png');
   }
-  if (kind === '3d' && !fs.existsSync(path.join(workspace, 'assets', 'player.glb'))) {
-    fs.mkdirSync(path.join(workspace, 'assets'), { recursive: true });
-    fs.writeFileSync(path.join(workspace, 'assets', 'player.glb'), buildGlb({ name: 'player', parts: PLAYER_CAR }).glb);
-    written.push('assets/player.glb');
+  for (const [name, parts] of Object.entries(MODELS_3D[kind] || {})) {
+    const file = path.join(workspace, 'assets', `${name}.glb`);
+    if (fs.existsSync(file)) continue;
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, buildGlb({ name, parts }).glb);
+    written.push(`assets/${name}.glb`);
   }
   return written;
 }
@@ -209,6 +260,6 @@ function makeSprite({ pixels, palette = {}, scale = 1, frames }) {
   return { png: encodePng(width, height, rgba), width, height, frameWidth: fw * s, frames: sheets.length, missing: [...missing] };
 }
 
-const { RECIPES } = require('./recipes');
+const { RECIPES, RECIPES_3D } = require('./recipes');
 
-module.exports = { TEMPLATES, RECIPES, installTemplate, makeSprite, encodePng };
+module.exports = { TEMPLATES, RECIPES, RECIPES_3D, MODELS_3D, installTemplate, makeSprite, encodePng };
