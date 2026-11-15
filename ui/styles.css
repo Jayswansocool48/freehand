@@ -440,3 +440,38 @@ body.busy .msg-actions .needs-idle { display: none; }
 .job progress { width: 100%; height: 6px; accent-color: var(--primary); }
 .job.fail { color: var(--destructive); }
 .hint.error-text { color: var(--destructive); overflow-wrap: anywhere; }
+
+/* Sources: site chips in the answer text and a list under it, the way Claude shows them. */
+.md a.cite { display: inline-flex; align-items: center; gap: 4px; vertical-align: baseline; padding: 1px 7px 1px 5px; margin: 0 2px; border-radius: 999px; background: var(--muted); color: var(--muted-foreground); font: 500 12px/1.5 var(--sans); text-decoration: none; transition: background-color 90ms, color 90ms; }
+.md a.cite:hover { background: var(--accent); color: var(--foreground); }
+.site-icon { width: 14px; height: 14px; border-radius: 3px; flex: none; object-fit: contain; }
+.ic.site-icon { font-size: 14px; color: var(--muted-foreground); }
+.sources { margin-top: 12px; }
+.sources > summary { display: inline-flex; align-items: center; gap: 8px; padding: 5px 10px 5px 6px; border-radius: 999px; border: 1px solid var(--border); background: var(--card); font: 500 12px var(--sans); color: var(--muted-foreground); cursor: pointer; list-style: none; }
+.sources > summary::-webkit-details-marker { display: none; }
+.sources > summary:hover { background: var(--accent); color: var(--foreground); }
+.sources > summary:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.icon-stack { display: inline-flex; }
+.icon-stack > * { margin-left: -4px; box-shadow: 0 0 0 2px var(--card); background: var(--card); border-radius: 4px; }
+.icon-stack > :first-child { margin-left: 0; }
+.source-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 2px; max-width: 560px; }
+.source-list a { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: var(--r-md); color: inherit; text-decoration: none; }
+.source-list a:hover { background: var(--accent); }
+.source-list .grow { min-width: 0; display: flex; flex-direction: column; }
+.source-list b { font: 500 13px var(--sans); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.source-list small { font: 12px var(--sans); color: var(--muted-foreground); }
+
+/* Connector directory: each app with its logo, like Claude's connector list. */
+.app-logo { display: inline-grid; place-items: center; width: 32px; height: 32px; flex: none; border-radius: 8px; border: 1px solid var(--border); background: var(--card); }
+.app-logo .site-icon { width: 18px; height: 18px; }
+.app-logo .ic { font-size: 18px; color: var(--muted-foreground); }
+.menu-hint { font-size: 12px; color: var(--muted-foreground); padding: 4px 10px 8px; }
+
+/* Plugin skill and command lists */
+.plain-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.plain-list li { display: flex; flex-direction: column; gap: 1px; padding: 6px 10px; border-radius: var(--r-md); background: var(--card); border: 1px solid var(--border); }
+.plain-list b { font: 500 13px var(--sans); }
+.plain-list small { font: 12px var(--sans); color: var(--muted-foreground); }
+#slash-pop { left: 0; }
+.fact-row { display: flex; align-items: center; gap: 8px; padding: 6px 6px 6px 12px; border-radius: var(--r-md); border: 1px solid var(--border); background: var(--card); font-size: 13.5px; }
+.own-model .token-input { margin-top: 8px; width: 100%; }

@@ -74,6 +74,8 @@ function defaultSettings() {
     search: { provider: 'duckduckgo', braveKey: '' },
     // Connectors: other apps' MCP servers (Blender, Figma...) whose tools the agent can use. See src/core/mcp.js.
     connectors: [],
+    // Memory, like Claude's and Manus's: the user's own instructions plus facts saved with the remember tool.
+    memory: { on: true, instructions: '', facts: [] },
     // font: '' means "use the operating system's UI font"; any installed font name can be typed in.
     ui: { theme: 'system', font: '', monoFont: '', chatFont: 'sans', enterSends: 'enter', reduceMotion: false },
   };
@@ -154,6 +156,13 @@ function applyPatch(settings, patch) {
   if (patch.search) {
     if (typeof patch.search.provider === 'string') next.search.provider = patch.search.provider;
     if (typeof patch.search.braveKey === 'string' && patch.search.braveKey.trim()) next.search.braveKey = patch.search.braveKey.trim();
+  }
+  if (patch.memory) {
+    next.memory = { on: true, instructions: '', facts: [], ...(next.memory || {}) };
+    if (typeof patch.memory.on === 'boolean') next.memory.on = patch.memory.on;
+    if (typeof patch.memory.instructions === 'string') next.memory.instructions = patch.memory.instructions.slice(0, 4000);
+    if (typeof patch.memory.forget === 'string') next.memory.facts = next.memory.facts.filter((f) => f.id !== patch.memory.forget);
+    if (patch.memory.forgetAll === true) next.memory.facts = [];
   }
   if (!next.providers[next.active]) next.active = 'ollama';
   return next;

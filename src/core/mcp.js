@@ -19,29 +19,29 @@ const CALL_TIMEOUT = 120000;
 /** Ready-made connectors the settings page offers. */
 const PRESETS = [
   {
-    id: 'blender',
+    id: 'blender', site: 'blender.org',
     name: 'Blender',
     type: 'command',
     command: 'uvx blender-mcp',
     help: 'Needs Blender with the blender-mcp add-on running (in Blender: N panel, BlenderMCP, Connect), and uv installed for the uvx command.',
   },
   {
-    id: 'figma',
+    id: 'figma', site: 'figma.com',
     name: 'Figma',
     type: 'url',
     url: 'http://127.0.0.1:3845/mcp',
     help: 'Needs the Figma desktop app with Dev Mode: Preferences, Enable Dev Mode MCP Server.',
   },
   // Online apps, the same connectors Claude has. "signIn" ones open the app's sign-in page once.
-  { id: 'linear', name: 'Linear', type: 'url', url: 'https://mcp.linear.app/mcp', signIn: true, help: 'Your Linear issues, projects and comments. Sign in with your Linear account.' },
-  { id: 'notion', name: 'Notion', type: 'url', url: 'https://mcp.notion.com/mcp', signIn: true, help: 'Your Notion pages and databases. Sign in with your Notion account.' },
-  { id: 'higgsfield', name: 'Higgsfield', type: 'url', url: 'https://mcp.higgsfield.ai/mcp', signIn: true, help: 'Image, video and 3D generation with your Higgsfield credits. Sign in with your Higgsfield account.' },
-  { id: 'cloudflare', name: 'Cloudflare', type: 'url', url: 'https://mcp.cloudflare.com/mcp', signIn: true, help: 'Your Cloudflare account: Workers, storage and settings. Sign in with Cloudflare.' },
-  { id: 'stripe', name: 'Stripe', type: 'url', url: 'https://mcp.stripe.com', signIn: true, help: 'Your Stripe account. Sign in with Stripe.' },
-  { id: 'wix', name: 'Wix', type: 'url', url: 'https://mcp.wix.com/mcp', signIn: true, help: 'Your Wix sites. Sign in with your Wix account.' },
-  { id: 'github', name: 'GitHub', type: 'url', url: 'https://api.githubcopilot.com/mcp/', token: true, help: 'Your GitHub repositories, issues and pull requests. GitHub does not allow sign-in from new apps, so paste a personal access token (make one at github.com/settings/tokens).' },
-  { id: 'context7', name: 'Context7', type: 'url', url: 'https://mcp.context7.com/mcp', help: 'Up-to-date documentation for code libraries such as three.js. No sign-in needed.' },
-  { id: 'firecrawl', name: 'Firecrawl', type: 'url', url: 'https://mcp.firecrawl.dev/v2/mcp', help: 'Web search and page reading. No sign-in needed for light use.' },
+  { id: 'linear', site: 'linear.app', name: 'Linear', type: 'url', url: 'https://mcp.linear.app/mcp', signIn: true, help: 'Your Linear issues, projects and comments. Sign in with your Linear account.' },
+  { id: 'notion', site: 'notion.so', name: 'Notion', type: 'url', url: 'https://mcp.notion.com/mcp', signIn: true, help: 'Your Notion pages and databases. Sign in with your Notion account.' },
+  { id: 'higgsfield', site: 'higgsfield.ai', name: 'Higgsfield', type: 'url', url: 'https://mcp.higgsfield.ai/mcp', signIn: true, help: 'Image, video and 3D generation with your Higgsfield credits. Sign in with your Higgsfield account.' },
+  { id: 'cloudflare', site: 'cloudflare.com', name: 'Cloudflare', type: 'url', url: 'https://mcp.cloudflare.com/mcp', signIn: true, help: 'Your Cloudflare account: Workers, storage and settings. Sign in with Cloudflare.' },
+  { id: 'stripe', site: 'stripe.com', name: 'Stripe', type: 'url', url: 'https://mcp.stripe.com', signIn: true, help: 'Your Stripe account. Sign in with Stripe.' },
+  { id: 'wix', site: 'wix.com', name: 'Wix', type: 'url', url: 'https://mcp.wix.com/mcp', signIn: true, help: 'Your Wix sites. Sign in with your Wix account.' },
+  { id: 'github', site: 'github.com', name: 'GitHub', type: 'url', url: 'https://api.githubcopilot.com/mcp/', token: true, help: 'Your GitHub repositories, issues and pull requests. GitHub does not allow sign-in from new apps, so paste a personal access token (make one at github.com/settings/tokens).' },
+  { id: 'context7', site: 'context7.com', name: 'Context7', type: 'url', url: 'https://mcp.context7.com/mcp', help: 'Up-to-date documentation for code libraries such as three.js. No sign-in needed.' },
+  { id: 'firecrawl', site: 'firecrawl.dev', name: 'Firecrawl', type: 'url', url: 'https://mcp.firecrawl.dev/v2/mcp', help: 'Web search and page reading. No sign-in needed for light use.' },
 ];
 
 /** Splits a command line into words, keeping "quoted parts" together. */
@@ -382,6 +382,7 @@ function normalize(c, existing = []) {
   while (existing.some((e) => e.id === id)) id = `${slug(name)}_${crypto.randomBytes(2).toString('hex')}`;
   const clean = (o) => Object.fromEntries(Object.entries(o && typeof o === 'object' ? o : {}).filter(([k]) => /^[\w.-]{1,80}$/.test(k)).map(([k, v]) => [k, String(v)]));
   const out = { id, name, type, enabled: true, trust: false, disabledTools: [] };
+  if (/^[a-z0-9.-]{1,80}$/i.test(String(c.site || ''))) out.site = String(c.site); // for the app's logo
   if (type === 'url') {
     if (!/^https?:\/\//i.test(String(c.url || ''))) throw new Error('The address must start with http:// or https://');
     out.url = String(c.url).trim();

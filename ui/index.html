@@ -114,10 +114,12 @@
       <div class="grow">
         <button type="button" id="attach" class="icon-btn" title="Attach files: 3D models, images, sounds" aria-label="Attach files"><span data-icon="paperclip"></span></button>
         <input type="file" id="attach-input" multiple hidden>
+        <button type="button" id="tools-chip" class="icon-btn" aria-haspopup="menu" aria-expanded="false" title="Connectors: turn apps on or off" aria-label="Connectors"><span data-icon="sliders-horizontal"></span></button>
         <button type="button" id="model-chip" class="picker" aria-haspopup="menu" aria-expanded="false" title="Choose model"></button>
         <button type="button" id="effort-chip" class="picker" aria-haspopup="menu" aria-expanded="false" title="Effort: how hard Freehand works on each task"></button>
         <button type="button" id="safety-chip" class="picker" aria-haspopup="menu" aria-expanded="false" title="Shell and Python commands: ask first, or run without asking"></button>
         <div id="model-pop" class="menu" data-side="up" role="menu" hidden></div>
+        <div id="slash-pop" class="menu" data-side="up" role="listbox" aria-label="Commands" hidden></div>
       </div>
       <button type="button" id="stop" class="send send-stop" title="Stop (Esc)" aria-label="Stop" hidden><span data-icon="stop"></span></button>
       <button type="submit" id="send" class="send" title="Send" aria-label="Send" disabled><span data-icon="arrow-up"></span></button>

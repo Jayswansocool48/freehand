@@ -34,6 +34,7 @@ Name=Freehand
 Comment=Autonomous AI agent on free models
 Exec=$TARGET %U
 Icon=freehand
+StartupWMClass=Freehand
 Terminal=false
 Categories=Utility;Development;
 DESK

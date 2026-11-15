@@ -8,6 +8,8 @@ const { stripThinking, extractJson, truncate, safePath } = require('./util');
 const { TEMPLATES } = require('../tools/gamekit');
 const mcp = require('./mcp');
 const memory = require('./memory');
+const { designBrief, missingFeatures } = require('./gamedesign');
+const plugins = require('./plugins');
 
 const TOOL_RESULT_FOR_MODEL = 6000;
 const TOOL_RESULT_FOR_UI = 3500;
@@ -31,11 +33,11 @@ Given the user's request, reply with ONLY a JSON object, no other text:
 - If the request needs real work: {"title": "<3-6 word title>", "steps": ["<imperative step>", ...]} with ${effort.steps} concrete steps.
 - If it is a simple question or chat that needs no tools: {"title": "<3-6 word title>", "answer": "<your complete answer in Markdown>"}.
 Prefer the fewest steps that get a verified result. Do not include a "write the final answer" step; finishing is automatic.
-Games: you build them yourself. Start with "Set up the 2D or 3D engine with game_engine", then steps that make the game's parts (3D models with make_model or sprites with make_sprite), "Write game.js: <the world, player, rules and goal>", and end with "Play-test with play_test and fix everything it reports". Use game_template only when the user asks to start from a template or starter. Do not plan web searches for how to code a game.
+Games: you build them yourself, and they must be the game that was asked for. When a game design is given, follow it: start with "Set up the 2D or 3D engine with game_engine", then steps that make the models (make_model) or sprites (make_sprite) for the important things, "Write game.js: <the world, player, and core loop>", then one step per feature in the design ("Add gathering with game_recipe gather"), and end with "Play-test with play_test and fix everything it reports". Use game_template only when the user asks to start from a template or starter. Do not plan web searches for how to code a game.
 ${apps ? `Connected apps the agent can use through their tools: ${apps}. When the request is about one of them (a Blender scene, a Figma design), plan steps that use that app.\n` : ''}${effort.work}`;
 }
 
-function systemPrompt({ plan, mode, tools, effort, files, apps }) {
+function systemPrompt({ plan, mode, tools, effort, files, apps, brief, skills, memory }) {
   const lines = [
     `You are Freehand, an autonomous agent that completes tasks end to end on the user's own computer. Today is ${new Date().toDateString()}. Platform: ${process.platform}.`,
     `Your workspace folder is the current directory; every file path you use is relative to it. Save deliverables (reports, code, data, HTML) as files there, not just in chat.`,
@@ -76,6 +78,18 @@ function systemPrompt({ plan, mode, tools, effort, files, apps }) {
     'Files already in the workspace:',
     files || '(none yet)',
     '',
+    ...(memory && memory.on !== false && (memory.instructions || (memory.facts || []).length) ? [
+      'About the user (from their settings and what they asked you to remember; follow it):',
+      ...(memory.instructions ? [memory.instructions.trim()] : []),
+      ...(memory.facts || []).slice(-40).map((f) => `- ${f.text}`),
+      '',
+    ] : []),
+    ...(skills && skills.length ? [
+      'Skills (instructions from Claude plugins) that may fit this task. Call use_skill with the name to load one before you start that part:',
+      ...skills.map((k) => `- ${k.id}: ${k.description.slice(0, 160)}`),
+      '',
+    ] : []),
+    ...(brief ? [brief, ''] : []),
     'PLAN (status in brackets):',
     ...plan.map((s, i) => `${i + 1}. [${s.status}] ${s.text}`),
   ];
@@ -141,6 +155,7 @@ class Agent {
     this.effort = effortOf(settings);
     this.game = { changed: false, errors: false, nudges: 0 }; // tracks whether the game was play-tested since it last changed
     this.stepWrites = 0; // files changed during the current plan step
+    this.sources = new Map(); // url -> { url, title, read }: pages found or read, shown under the answer like Claude does
     this.writes = 0; // files changed during the whole task, to tell progress from going round in circles
     this.claimNudges = 0;
     this.failStreak = 0;
@@ -267,6 +282,57 @@ class Agent {
     return null;
   }
 
+  /**
+   * Skills from Claude plugins: the use_skill tool loads any of them, and the ones that match this
+   * request are listed in the instructions so the model knows they exist.
+   */
+  addSkills(userText) {
+    let all = [];
+    try { all = plugins.active(this.settings).skills; } catch { return; }
+    if (!all.length || this.toolByName.use_skill) return;
+    this.skills = plugins.relevantSkills(all, userText);
+    const tool = {
+      name: 'use_skill',
+      icon: 'puzzle-piece',
+      description: 'Load a skill: expert instructions from a Claude plugin for one kind of task (design, testing, writing...). Returns the instructions to follow. Give its name, like "frontend-design" or "plugin:skill".',
+      parameters: { type: 'object', properties: { name: { type: 'string', description: 'skill name' } }, required: ['name'] },
+      label: (a) => `Using the ${a.name} skill`,
+      run: async (a) => {
+        const want = String(a.name || '').trim().toLowerCase();
+        const k = all.find((x) => x.id.toLowerCase() === want) || all.find((x) => x.name.toLowerCase() === want.split(':').pop());
+        if (!k) throw new Error(`No skill named "${a.name}". Some that exist: ${all.slice(0, 25).map((x) => x.id).join(', ')}`);
+        return plugins.skillText(k);
+      },
+    };
+    this.tools.push(tool);
+    this.toolByName.use_skill = tool;
+  }
+
+  /** The remember tool: saves a lasting fact about the user so every later task knows it. */
+  addMemoryTool() {
+    if (this.toolByName.remember || (this.settings.memory && this.settings.memory.on === false)) return;
+    const tool = {
+      name: 'remember',
+      icon: 'brain',
+      description: 'Save a lasting fact about the user or how they like things done, so every future task knows it. Use it when they say "remember", or state a preference that will matter again (their name, the engine they use, a style they want). Not for facts about this task only.',
+      parameters: { type: 'object', properties: { fact: { type: 'string', description: 'one short sentence' } }, required: ['fact'] },
+      label: () => 'Remembering',
+      run: async (a) => {
+        const fact = String(a.fact || '').trim().slice(0, 300);
+        if (!fact) throw new Error('Give the fact to remember');
+        const { loadSettings, saveSettings } = require('./config');
+        const s = loadSettings();
+        const memory = { on: true, instructions: '', facts: [], ...(s.memory || {}) };
+        if (!memory.facts.some((f) => f.text.toLowerCase() === fact.toLowerCase())) memory.facts.push({ id: Date.now().toString(36), text: fact, created: Date.now() });
+        saveSettings({ ...s, memory });
+        this.notice(`Freehand will remember: ${fact}`);
+        return `Saved. It is in Settings, Memory, where the user can see and delete it.`;
+      },
+    };
+    this.tools.push(tool);
+    this.toolByName.remember = tool;
+  }
+
   /** Adds the tools of every enabled connector (Blender, Figma...) for this request. */
   async addConnectorTools() {
     if (!(this.settings.connectors || []).some((c) => c.enabled !== false)) return;
@@ -302,7 +368,7 @@ class Agent {
     const names = this.tools.map((t) => t.name);
     let files = '';
     try { files = truncate(listDir(this.workspace, '.', 3), 1500); } catch { /* workspace not readable */ }
-    const messages = [{ role: 'system', content: systemPrompt({ plan: this.plan, mode, tools: this.tools, effort: this.effort, files, apps: this.appNames() }) }, ...this.render(mode)];
+    const messages = [{ role: 'system', content: systemPrompt({ plan: this.plan, mode, tools: this.tools, effort: this.effort, files, apps: this.appNames(), brief: this.brief && this.brief.text, skills: this.skills, memory: this.settings.memory }) }, ...this.render(mode)];
     let r;
     try {
       r = await this.callModel(messages, mode === 'native' ? this.tools : null);
@@ -350,11 +416,21 @@ class Agent {
   /** `turn` tags the history entry so the chat can be rewound to this message later. */
   async run(userText, turn) {
     this.sanitizeHistory();
+    // "/name words" runs a command from a Claude plugin: its prompt replaces the message.
+    let expanded = null;
+    try { expanded = plugins.expandCommand(this.settings, userText); } catch { /* no plugins */ }
+    if (expanded) {
+      this.notice(`Running the ${userText.trim().split(/\s/)[0]} command from a Claude plugin.`);
+      userText = expanded;
+    }
     this.history.push({ role: 'user', content: userText, ...(turn === undefined ? {} : { turn }) });
     this.emit('status', { status: 'running' });
     try {
       await this.addConnectorTools();
-      const planned = await this.planTask(userText);
+      this.addSkills(userText);
+      this.addMemoryTool();
+      this.brief = await this.designGame(userText);
+      const planned = await this.planTask(this.brief ? `${userText}\n\n${this.brief.text}` : userText);
       if (planned.title) this.emit('title', { title: String(planned.title).slice(0, 80) });
       if (typeof planned.answer === 'string' && !Array.isArray(planned.steps)) {
         this.history.push({ role: 'assistant', content: planned.answer });
@@ -477,6 +553,7 @@ class Agent {
       }
       this.emit('tool_result', { id: call.id, ok, preview: truncate(output, TOOL_RESULT_FOR_UI) });
       if (ok && call.name === 'play_test') output += this.repeatedError(output);
+      if (ok) this.noteSources(call, output);
       this.trackGame(call, ok, output);
       if (ok && WRITES.includes(call.name)) { this.stepWrites++; this.writes++; }
       if (ok && ['file_write', 'file_edit'].includes(call.name)) this.lastCalls = []; // the files changed, so repeating a test or run is new work
@@ -539,7 +616,35 @@ class Agent {
     if (!hasPage) return null;
     if (this.game.changed) { this.game.nudges++; return 'Not finished yet: you changed the game or page since it was last tested. Run play_test on it (with a few inputs), fix anything it reports, then finish.'; }
     if (this.game.errors) { this.game.nudges++; return 'Not finished yet: the last play_test reported errors, warnings or files that failed to load. Fix them and run play_test again, then finish.'; }
+    let js = '';
+    try { js = fs.readFileSync(path.join(this.workspace, 'game.js'), 'utf8'); } catch { /* not a kit game */ }
+    const missing = js ? missingFeatures(this.brief, js) : [];
+    if (missing.length && (this.game.designNudges || 0) < 3) {
+      this.game.designNudges = (this.game.designNudges || 0) + 1;
+      return `Not finished yet: the game does not do what was asked. It still needs: ${missing.map((f) => `${f.what}${f.recipe ? ` (game_recipe "${f.recipe}")` : ''}`).join('; ')}. Add them to game.js, play_test, then finish.`;
+    }
     return null;
+  }
+
+  /**
+   * A design brief for a game request. A game the request names to copy that Freehand does not know
+   * gets looked up on the web first (the way Manus researches), so the model builds that game.
+   */
+  async designGame(userText) {
+    let brief = designBrief(userText);
+    if (!brief || !brief.like || brief.features.length || !this.toolByName.web_search) return brief;
+    const call = { id: `call_${++this.callCounter}`, name: 'web_search', args: { query: `${brief.like} video game gameplay how to play` } };
+    const tool = this.toolByName.web_search;
+    this.emit('tool', { id: call.id, name: call.name, label: `Researching how ${brief.like} plays`, icon: tool.icon, args: call.args });
+    try {
+      const out = await tool.run(call.args, this.context());
+      this.emit('tool_result', { id: call.id, ok: true, preview: truncate(out, TOOL_RESULT_FOR_UI) });
+      this.noteSources(call, out);
+      brief = designBrief(userText, truncate(out, 1800));
+    } catch (e) {
+      this.emit('tool_result', { id: call.id, ok: false, preview: `ERROR: ${e.message}` });
+    }
+    return brief;
   }
 
   context() {
@@ -554,7 +659,38 @@ class Agent {
     };
   }
 
+  /** Remembers the pages a search found or a fetch read, for the sources list under the answer. */
+  noteSources(call, output) {
+    const add = (url, title, read) => {
+      if (!/^https?:\/\//i.test(url)) return;
+      const have = this.sources.get(url);
+      this.sources.set(url, { url, title: (have && have.title) || title || '', read: !!(read || (have && have.read)) });
+    };
+    if (call.name === 'web_search') {
+      for (const m of output.matchAll(/^\d+\. (.+)\n\s+(https?:\/\/\S+)/gm)) add(m[2], m[1].trim(), false);
+    } else if (call.name === 'web_fetch') {
+      const m = /^URL: (\S+)/.exec(output);
+      const title = /^#\s+(.+)$/m.exec(output) || /^Title: (.+)$/m.exec(output);
+      add(m ? m[1] : String(call.args.url || ''), title ? title[1].trim() : '', true);
+    } else if (call.name === 'browser' && call.args && call.args.url) {
+      add(String(call.args.url), '', true);
+    }
+  }
+
+  /** Sources for the answer: pages it links to, in order, then other pages it read. */
+  answerSources(message) {
+    const cited = [...new Set([...String(message).matchAll(/https?:\/\/[^\s)<>\]"']+[^\s)<>\]"'.,;:!?]/g)].map((m) => m[0]))];
+    const out = cited.map((url) => this.sources.get(url) || { url, title: '', read: false });
+    for (const s of this.sources.values()) if (s.read && !cited.includes(s.url)) out.push(s);
+    return out.slice(0, 30).map(({ url, title }) => ({ url, title }));
+  }
+
   finish(message, files) {
+    // Small models sometimes put "| " in front of every line, which renders as a broken table.
+    const lines = String(message).split('\n');
+    if (lines.length > 2 && lines.filter((l) => /^\| ?/.test(l)).length >= lines.length * 0.8 && !lines.some((l) => /^\|?\s*:?-{3,}/.test(l))) {
+      message = lines.map((l) => l.replace(/^\| ?/, '')).join('\n');
+    }
     for (const s of this.plan) s.status = 'done';
     this.emit('plan', { steps: this.plan.map((s) => ({ ...s })) });
     const existing = [];
@@ -562,7 +698,7 @@ class Agent {
       try { const p = safePath(this.workspace, f); if (fs.existsSync(p) && fs.statSync(p).isFile()) existing.push(path.relative(this.workspace, p).replace(/\\/g, '/')); } catch { /* skip */ }
     }
     this.history.push({ role: 'assistant', content: message });
-    this.emit('final', { message, files: existing });
+    this.emit('final', { message, files: existing, sources: this.answerSources(message) });
     this.emit('status', { status: 'done' });
     return { status: 'done', message };
   }

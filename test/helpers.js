@@ -31,6 +31,7 @@ const text = (content) => ({ role: 'assistant', content });
 function tempHome() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'freehand-test-'));
   process.env.FREEHAND_HOME = dir;
+  process.env.CLAUDE_CONFIG_DIR = path.join(dir, 'claude'); // tests never see the real ~/.claude plugins
   process.env.FREEHAND_RETRY_SCALE = '0.001';
   return dir;
 }

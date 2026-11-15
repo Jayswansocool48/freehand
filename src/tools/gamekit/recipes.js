@@ -378,6 +378,113 @@ const SCENERY = 'assets/tree.glb';`,
 }`,
     update: ``,
   },
+  gather: {
+    about: 'survival gathering: trees and rocks around the world; press F, Enter or click next to one to hit it for wood or stone, shown in an inventory line (inv.wood, inv.stone)',
+    top: `const NODES = []; // trees and rocks the player can hit
+const inv = { wood: 0, stone: 0, food: 0 };
+const power = { tree: 1, rock: 1 }; // the craft recipe raises these when tools are made
+function showInv() { Kit.hud(\`Wood \${inv.wood}   Stone \${inv.stone}\`, 'inv'); }`,
+    init: `NODES.length = 0;
+inv.wood = 0; inv.stone = 0; inv.food = 0;
+for (let i = 0; i < 18; i++) {
+  const kind = i % 3 === 2 ? 'rock' : 'tree';
+  const n = Kit.group(Kit.rand(-28, 28), 0, Kit.rand(-28, 28));
+  if (n.position.length() < 5) n.position.x += 9; // keep the start clear
+  if (kind === 'tree') {
+    n.add(Kit.shape.cylinder(0.3, 2, '#6d4c2f'));
+    const leaves = Kit.shape.cone(1.3, 2.6, '#2e7d32');
+    leaves.position.y = 1.6;
+    n.add(leaves);
+  } else {
+    n.add(Kit.shape.sphere(0.9, '#8d9096'));
+  }
+  n.kind = kind;
+  n.hp = kind === 'tree' ? 4 : 5;
+  Kit.solid(n);
+  NODES.push(n);
+}
+showInv();`,
+    update: `if (Kit.pressed('action')) {
+  const n = NODES.find((o) => Kit.near(g.player, o, 2.4));
+  if (n) {
+    const res = n.kind === 'tree' ? 'wood' : 'stone';
+    n.hp -= power[n.kind];
+    inv[res] += power[n.kind];
+    Kit.sfx('hit');
+    Kit.burst(n.position.clone().setY(1), n.kind === 'tree' ? '#8d6e63' : '#b0b4ba');
+    if (n.hp <= 0) { inv[res] += 2; Kit.remove(n); NODES.splice(NODES.indexOf(n), 1); Kit.sfx('coin'); }
+    showInv();
+  }
+}`,
+  },
+  craft: {
+    needs: ['gather'],
+    about: 'crafting for the gather recipe: press 1 for a hatchet (5 wood, doubles wood) and 2 for a pickaxe (3 wood + 5 stone, doubles stone); a line shows the recipes and what you have',
+    top: `const tools = { hatchet: false, pickaxe: false };
+function showCraft() { Kit.hud(\`1 Hatchet (5 wood)\${tools.hatchet ? ' made' : ''}   2 Pickaxe (3 wood, 5 stone)\${tools.pickaxe ? ' made' : ''}\`, 'craft'); }`,
+    init: `tools.hatchet = false; tools.pickaxe = false;
+power.tree = 1; power.rock = 1;
+showCraft();`,
+    update: `if (Kit.key('Digit1') && !tools.hatchet && inv.wood >= 5) {
+  inv.wood -= 5; tools.hatchet = true; power.tree = 2; Kit.sfx('power'); showInv(); showCraft();
+}
+if (Kit.key('Digit2') && !tools.pickaxe && inv.wood >= 3 && inv.stone >= 5) {
+  inv.wood -= 3; inv.stone -= 5; tools.pickaxe = true; power.rock = 2; Kit.sfx('power'); showInv(); showCraft();
+}`,
+  },
+  build: {
+    needs: ['gather'],
+    about: 'building for the gather recipe: press B to place a wooden wall in front of the player (2 wood) and V for a stone one (2 stone); walls are solid',
+    top: `function placeWall(p, color) {
+  const fx = Math.sin(p.rotation.y), fz = Math.cos(p.rotation.y);
+  const w = Kit.box(2, 2, 0.3, color, p.position.x + fx * 2, 0, p.position.z + fz * 2);
+  w.rotation.y = p.rotation.y;
+  Kit.solid(w);
+  Kit.sfx('click');
+}`,
+    init: `Kit.hud('B wood wall (2 wood)   V stone wall (2 stone)', 'build');`,
+    update: `if (Kit.key('KeyB') && inv.wood >= 2) { inv.wood -= 2; placeWall(g.player, '#8d6e63'); showInv(); }
+if (Kit.key('KeyV') && inv.stone >= 2) { inv.stone -= 2; placeWall(g.player, '#8d9096'); showInv(); }`,
+  },
+  hunger: {
+    about: 'survival needs: health and hunger that run down; berry bushes to eat from (F, Enter or click next to one); starving hurts and at 0 health the round ends',
+    top: `const stats = { health: 100, hunger: 100 };
+const BUSHES = [];
+function showStats() { Kit.hud(\`Health \${Math.ceil(stats.health)}   Hunger \${Math.ceil(stats.hunger)}\`, 'stats'); }`,
+    init: `stats.health = 100; stats.hunger = 100;
+BUSHES.length = 0;
+for (let i = 0; i < 8; i++) {
+  const b = Kit.group(Kit.rand(-25, 25), 0, Kit.rand(-25, 25));
+  b.add(Kit.shape.sphere(0.6, '#3f8f3a'));
+  for (let k = 0; k < 4; k++) { const berry = Kit.shape.sphere(0.12, '#c62828'); berry.position.set(Kit.rand(-0.4, 0.4), Kit.rand(0.5, 0.9), Kit.rand(-0.4, 0.4)); b.add(berry); }
+  BUSHES.push(b);
+}
+showStats();`,
+    update: `stats.hunger = Math.max(0, stats.hunger - dt * 1.5);
+if (stats.hunger === 0) stats.health -= dt * 6;
+if (Kit.pressed('action')) {
+  const b = BUSHES.find((o) => Kit.near(g.player, o, 2));
+  if (b) { stats.hunger = Math.min(100, stats.hunger + 35); Kit.remove(b); BUSHES.splice(BUSHES.indexOf(b), 1); Kit.sfx('coin'); }
+}
+showStats();
+if (stats.health <= 0) Kit.gameOver('You starved');`,
+  },
+  daynight: {
+    about: 'a day and night cycle (one day is 90 seconds): the sky and lights darken at night; g.night is true at night, so other code can spawn more enemies then',
+    top: `const DAY = 90;
+let clock = 0;
+const daySky = new THREE.Color('#9fd3f5'), nightSky = new THREE.Color('#0b1324');`,
+    init: `clock = 0;`,
+    update: `clock += dt;
+const sunUp = 0.5 + 0.5 * Math.cos((clock / DAY) * Math.PI * 2); // 1 at noon, 0 at midnight
+g.night = sunUp < 0.3;
+Kit.sun.intensity = 0.2 + 2 * sunUp;
+Kit.hemi.intensity = 0.25 + 1.05 * sunUp;
+const sky = nightSky.clone().lerp(daySky, sunUp);
+Kit.scene.background = sky;
+if (Kit.scene.fog) Kit.scene.fog.color.copy(sky);
+Kit.hud(g.night ? 'Night' : 'Day', 'time');`,
+  },
 };
 
 /** One recipe as text the model can paste in, part by part. */
@@ -387,7 +494,8 @@ function recipeText(name, three = false) {
   if (!r) throw new Error(`Unknown ${three ? '3D ' : ''}recipe "${name}". Choose one of: ${Object.keys(set).join(', ')}.`);
   const part = (title, code) => (code ? `\n--- ${title} ---\n${code}\n` : '');
   if (three) {
-    return `Recipe "${name}" for this kit3d.js game: ${r.about}.\nPaste each part into game.js with file_edit. It uses g.player.\n` +
+    return `Recipe "${name}" for this kit3d.js game: ${r.about}.\nPaste each part into game.js with file_edit. It uses g.player.` +
+      (r.needs ? ` It builds on the ${r.needs.join(' and ')} recipe${r.needs.length > 1 ? 's' : ''}: add ${r.needs.length > 1 ? 'those' : 'that'} first.` : '') + '\n' +
       part('1. top of game.js, after the other let/const lines', r.top) +
       part('2. inside init(g), at the end (after g.player is made)', r.init) +
       part('3. inside update(g, dt), at the end', r.update) +

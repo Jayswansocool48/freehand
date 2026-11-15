@@ -12,6 +12,7 @@ const { TaskStore } = require('./tasks');
 const { previewUrl, ensurePreview } = require('./preview');
 const ollama = require('../core/ollama');
 const mcp = require('../core/mcp');
+const plugins = require('../core/plugins');
 // A connector's token was refreshed while in use: keep the new one so the user stays signed in.
 mcp.manager.saveAuth = (id, auth) => {
   const s = loadSettings();
@@ -74,6 +75,35 @@ function send(res, status, body, headers = {}) {
  * Starts the local server. A random per-launch token (cookie, SameSite=Strict) plus Host checks stop
  * other websites or local processes from driving the agent, since it can run commands on this machine.
  */
+// Site icons for the sources list under answers. The page may only load images from Freehand
+// itself, so the server fetches each site's icon once and keeps it in memory.
+const icons = new Map();
+async function siteIcon(domain) {
+  if (!/^[a-z0-9.-]{1,253}\.[a-z]{2,}$/i.test(domain)) return null;
+  if (icons.has(domain)) return icons.get(domain);
+  const grab = async (u) => {
+    try {
+      const r = await fetch(u, { redirect: 'follow', signal: AbortSignal.timeout(6000) });
+      const type = (r.headers.get('content-type') || '').split(';')[0];
+      if (!r.ok || !/^image\//.test(type) || /svg/.test(type)) return null;
+      const body = Buffer.from(await r.arrayBuffer());
+      return body.length > 0 && body.length < 200000 ? { type, body } : null;
+    } catch { return null; }
+  };
+  let icon = await grab(`https://${domain}/favicon.ico`);
+  if (!icon) {
+    try {
+      const html = await (await fetch(`https://${domain}/`, { signal: AbortSignal.timeout(6000) })).text();
+      const m = /<link[^>]+rel=["'][^"']*icon[^"']*["'][^>]*>/i.exec(html.slice(0, 200000));
+      const href = m && /href=["']([^"']+)["']/i.exec(m[0]);
+      if (href) icon = await grab(new URL(href[1], `https://${domain}/`).href);
+    } catch { /* no icon */ }
+  }
+  if (icons.size > 500) icons.clear();
+  icons.set(domain, icon);
+  return icon;
+}
+
 function startServer({ port = 0, host = '127.0.0.1', token = crypto.randomBytes(24).toString('hex') } = {}) {
   const store = new TaskStore();
 
@@ -170,6 +200,47 @@ function startServer({ port = 0, host = '127.0.0.1', token = crypto.randomBytes(
         return send(res, 200, view());
       }
       return send(res, 405, { error: 'Not allowed' });
+    }
+    if (parts[0] === 'plugins') {
+      const settings = loadSettings();
+      const off = (settings.plugins && settings.plugins.off) || [];
+      const view = (extra = {}) => ({
+        ...extra,
+        plugins: plugins.listAll().map((p) => ({
+          id: p.id, name: p.name, description: p.description, version: p.version, source: p.source, hooks: p.hooks,
+          on: !off.includes(p.id),
+          skills: p.skills.map(({ id, name, description }) => ({ id, name, description })),
+          commands: p.commands.map(({ name, description }) => ({ name, description })),
+          mcp: p.mcp,
+        })),
+      });
+      const id = parts[1] ? decodeURIComponent(parts[1]) : '';
+      if (!id && method === 'GET') return send(res, 200, view());
+      if (!id && method === 'POST') {
+        const { github } = await readBody(req);
+        try { const p = await plugins.addFromGithub(github); return send(res, 200, view({ added: p.id })); } catch (e) { return send(res, 400, { error: e.message }); }
+      }
+      if (id && method === 'PUT') {
+        const { on } = await readBody(req);
+        const next = on ? off.filter((x) => x !== id) : [...new Set([...off, id])];
+        saveSettings({ ...settings, plugins: { ...(settings.plugins || {}), off: next } });
+        return send(res, 200, view());
+      }
+      if (id && method === 'DELETE') {
+        try { plugins.removeOwn(id); } catch (e) { return send(res, 400, { error: e.message }); }
+        return send(res, 200, view());
+      }
+      return send(res, 405, { error: 'Not allowed' });
+    }
+    if (parts[0] === 'commands' && method === 'GET') {
+      const list = plugins.active(loadSettings()).commands.map(({ name, description, plugin }) => ({ name, description, plugin }));
+      return send(res, 200, { commands: list });
+    }
+    if (parts[0] === 'favicon') {
+      const icon = await siteIcon(String(url.searchParams.get('domain') || ''));
+      if (!icon) return send(res, 404, { error: 'No icon' });
+      res.writeHead(200, { 'content-type': icon.type, 'cache-control': 'max-age=604800' });
+      return res.end(icon.body);
     }
     if (parts[0] === 'info') return send(res, 200, { version, dataDir: homeDir(), platform: process.platform, desktop: !!process.versions.electron });
     if (parts[0] === 'ollama') {

@@ -39,22 +39,33 @@ async function useLocalThree(dir, url) {
     .replace('https://unpkg.com/three@0.180.0/examples/jsm/', `${base}/lib/three/examples/jsm/`));
 }
 
-/** Pastes a recipe's parts into the blank 3D game at its markers. */
+const SURVIVAL = ['gather', 'craft', 'build', 'hunger', 'daynight'];
+
+/** Pastes a recipe's parts into the blank 3D game at its markers, keeping the markers for the next one. */
 function withRecipe(text, r) {
   return text
-    .replace('// RECIPE TOP', r.top)
-    .replace('  // RECIPE INIT', r.init.replace(/^/gm, '  '))
-    .replace('  // RECIPE UPDATE', r.update.replace(/^/gm, '  '));
+    .replace('// RECIPE TOP', `${r.top}\n// RECIPE TOP`)
+    .replace('  // RECIPE INIT', `${r.init.replace(/^/gm, '  ')}\n  // RECIPE INIT`)
+    .replace('  // RECIPE UPDATE', `${r.update.replace(/^/gm, '  ')}\n  // RECIPE UPDATE`);
 }
 
 async function play(b, kind, recipe) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fh3d-'));
   installTemplate(dir, kind, { title: kind });
   if (recipe === 'scenery') fs.writeFileSync(path.join(dir, 'assets', 'tree.glb'), buildGlb({ name: 'tree', parts: TREE }).glb);
-  if (recipe) fs.writeFileSync(path.join(dir, 'game.js'), withRecipe(fs.readFileSync(path.join(dir, 'game.js'), 'utf8'), RECIPES_3D[recipe]));
+  // A recipe goes in after the recipes it builds on; "survival" is all the survival recipes together.
+  const names = recipe === 'survival' ? SURVIVAL : recipe ? [...(RECIPES_3D[recipe].needs || []), recipe] : [];
+  for (const n of names) {
+    let r = RECIPES_3D[n];
+    // Put the first tree right in front of the player so the test can chop it.
+    if (recipe === 'survival' && n === 'gather') r = { ...r, init: r.init.replace('showInv();', "NODES.sort((a, b) => (a.kind === 'tree' ? -1 : 1) - (b.kind === 'tree' ? -1 : 1));\nNODES[0].position.set(0, 0, 1.6);\nshowInv();") };
+    fs.writeFileSync(path.join(dir, 'game.js'), withRecipe(fs.readFileSync(path.join(dir, 'game.js'), 'utf8'), r));
+  }
   const url = await previewUrl(dir, 'index.html');
   await useLocalThree(dir, url);
-  const text = await b.playTest({ url, actions: INPUTS[kind], seconds: 2 });
+  const actions = recipe === 'survival' ? ['click', 'tap KeyF 5 250', 'key Digit1', 'wait 300'] : INPUTS[kind];
+  const text = await b.playTest({ url, actions, seconds: 2 });
+  if (recipe === 'survival' && !/1 Hatchet \(5 wood\) made/.test(text)) return { ok: false, text: 'Chopping the tree in front and crafting a hatchet did not work.\n' + text, dir };
   const state = (text.match(/Game state \(window\.__game\): (\{.*\})/) || [])[1];
   const bad = /^(ERRORS|FILES THAT FAILED|WATCH OUT)/m.test(text) || !state || JSON.parse(state).state === 'title';
   return { ok: !bad, text, state, dir };
@@ -63,7 +74,7 @@ async function play(b, kind, recipe) {
 async function main() {
   const only = process.argv.slice(2);
   const kinds = Object.keys(TEMPLATES).filter((k) => TEMPLATES[k].three && (!only.length || only.includes(k)));
-  const recipes = !only.length || only.includes('recipes') ? Object.keys(RECIPES_3D || {}) : [];
+  const recipes = !only.length || only.includes('recipes') ? [...Object.keys(RECIPES_3D || {}), 'survival'] : only.filter((n) => RECIPES_3D[n] || n === 'survival');
   const b = new BrowserSession({ headless: true, shotsDir: path.join(os.tmpdir(), 'fh3d-shots') });
   let failed = 0;
   try {

@@ -408,11 +408,14 @@
     state.panelTab = 'play';
     renderPanel();
   }
+  // Redraws overlap while Freehand writes files; only the newest may draw, or each adds its own player.
+  let playGen = 0;
   async function renderPlay() {
+    const gen = ++playGen;
     const body = $('#cp-body');
     const status = $('#cp-status');
     const files = (await fileTree()).filter((f) => !f.isDir && (isPage(f.name) || isModel(f.name))).map((f) => f.rel);
-    if (state.panelTab !== 'play') return;
+    if (state.panelTab !== 'play' || gen !== playGen) return;
     if (!state.playPath || !files.includes(state.playPath)) state.playPath = files.find((f) => /(^|\/)index\.html?$/i.test(f)) || files.find(isPage) || files[0] || null;
     const key = `${state.current}|${state.playPath}|${state.playNonce}`;
     if (body.dataset.play === key && body.querySelector('iframe')) return; // keep the running game
@@ -424,7 +427,8 @@
       return;
     }
     const { url } = await api(`/tasks/${state.current}/preview?path=${encodeURIComponent(state.playPath)}`).catch(() => ({ url: '' }));
-    if (state.panelTab !== 'play' || body.dataset.play !== key) return;
+    if (state.panelTab !== 'play' || body.dataset.play !== key || gen !== playGen) return;
+    body.innerHTML = '';
     const bar = el('div', 'cp-bar play-bar');
     const pick = el('select'); pick.setAttribute('aria-label', 'What to play');
     for (const f of files) { const o = el('option', '', esc(f)); o.value = f; pick.append(o); }
@@ -561,11 +565,53 @@
     const ext = (name.split('.').pop() || '').toLowerCase();
     return { glb: '3D model', gltf: '3D model', obj: '3D model', fbx: '3D model', stl: '3D model', md: 'Markdown', txt: 'Text', csv: 'CSV', json: 'JSON', html: 'Web page or game', py: 'Python', js: 'JavaScript', png: 'Image', jpg: 'Image', svg: 'SVG' }[ext] || ext.toUpperCase() || 'File';
   }
+  /* Sources, shown the way Claude shows them: site chips in the text and a list under the answer. */
+  const siteOf = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return u; } };
+  const siteName = (u) => { const h = siteOf(u).split('.'); return h.length > 1 ? h[h.length - 2] : h[0]; };
+  function siteIcon(u) {
+    const img = el('img', 'site-icon');
+    img.alt = ''; img.width = img.height = 14; img.loading = 'lazy';
+    img.src = `/api/favicon?domain=${encodeURIComponent(siteOf(u))}`;
+    img.addEventListener('error', () => img.replaceWith(ic('globe', 'ic site-icon')), { once: true });
+    return img;
+  }
+  function citeLinks(body, sources) {
+    const known = new Map(sources.map((x) => [x.url, x]));
+    for (const a of body.querySelectorAll('a[href]')) {
+      const src = known.get(a.getAttribute('href'));
+      if (!src) continue;
+      a.className = 'cite';
+      a.title = src.title || siteOf(src.url);
+      a.textContent = '';
+      a.append(siteIcon(src.url), document.createTextNode(siteName(src.url)));
+    }
+  }
+  function sourcesBlock(sources) {
+    const d = el('details', 'sources');
+    const sum = el('summary');
+    const stack = el('span', 'icon-stack');
+    for (const x of sources.slice(0, 4)) stack.append(siteIcon(x.url));
+    sum.append(stack, document.createTextNode(`${sources.length} source${sources.length === 1 ? '' : 's'}`));
+    const list = el('ol', 'source-list');
+    for (const x of sources) {
+      const li = el('li');
+      const a = el('a'); a.href = x.url; a.target = '_blank'; a.rel = 'noopener noreferrer';
+      const txt = el('span', 'grow'); txt.append(el('b', '', esc(x.title || siteOf(x.url))), el('small', '', esc(siteOf(x.url))));
+      a.append(siteIcon(x.url), txt);
+      li.append(a);
+      list.append(li);
+    }
+    d.append(sum, list);
+    return d;
+  }
+
   function finalBlock(ev) {
     const c = el('div', 'final');
     const page = (ev.files || []).find(isPage);
     if (page) { state.playPath = page; state.playNonce++; if (state.panelTab === 'play') renderPanel(); }
-    c.append(el('div', 'msg-ai md', renderMarkdown(ev.message)));
+    const body = el('div', 'msg-ai md', renderMarkdown(ev.message));
+    c.append(body);
+    if (ev.sources && ev.sources.length) { citeLinks(body, ev.sources); c.append(sourcesBlock(ev.sources)); }
     if (ev.files && ev.files.length) {
       const box = el('div', 'files');
       for (const f of ev.files) {
@@ -727,6 +773,47 @@
     }
   }
 
+  /* Slash commands from Claude plugins: typing "/" lists them above the message box. */
+  let commands = null;
+  let slash = { items: [], sel: 0 };
+  async function slashMenu() {
+    const v = $('#input').value;
+    const m = /^\/([\w:.-]*)$/.exec(v);
+    const menu = $('#slash-pop');
+    if (!m) { menu.hidden = true; slash.items = []; return; }
+    if (!commands) commands = (await api('/commands').catch(() => ({ commands: [] }))).commands;
+    const q = m[1].toLowerCase();
+    slash.items = commands.filter((c) => c.name.toLowerCase().includes(q.split(':').pop())).slice(0, 8);
+    slash.sel = 0;
+    menu.innerHTML = '';
+    if (!slash.items.length) { menu.hidden = true; return; }
+    menu.append(el('div', 'menu-label', 'Commands from your Claude plugins'));
+    slash.items.forEach((c, i) => {
+      const it = menuItem(null, '/' + c.name, c.description || c.plugin, () => pickSlash(i));
+      it.tabIndex = -1;
+      it.addEventListener('mousedown', (e) => e.preventDefault()); // keep the cursor in the message box
+      menu.append(it);
+    });
+    markSlash();
+    menu.hidden = false;
+  }
+  function markSlash() { $$('#slash-pop .menu-item').forEach((it, i) => it.toggleAttribute('data-active', i === slash.sel)); }
+  function pickSlash(i) {
+    const c = slash.items[i];
+    if (!c) return;
+    const input = $('#input');
+    input.value = `/${c.name} `;
+    $('#slash-pop').hidden = true; slash.items = [];
+    autosize(); input.focus();
+  }
+  function slashKey(e) {
+    if (!slash.items.length || $('#slash-pop').hidden) return false;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); slash.sel = (slash.sel + (e.key === 'ArrowDown' ? 1 : slash.items.length - 1)) % slash.items.length; markSlash(); return true; }
+    if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) { e.preventDefault(); pickSlash(slash.sel); return true; }
+    if (e.key === 'Escape') { $('#slash-pop').hidden = true; slash.items = []; return true; }
+    return false;
+  }
+
   function updateSend() { $('#send').disabled = !$('#input').value.trim(); }
   function autosize() { updateSend(); const i = $('#input'); i.style.height = 'auto'; i.style.height = Math.min(240, i.scrollHeight) + 'px'; }
 
@@ -801,6 +888,8 @@
     ['models', 'Models', 'cpu'],
     ['capabilities', 'Capabilities', 'puzzle-piece'],
     ['connectors', 'Connectors', 'plugs-connected'],
+    ['plugins', 'Plugins', 'puzzle-piece'],
+    ['memory', 'Memory', 'brain'],
     ['shortcuts', 'Shortcuts', 'keyboard'],
     ['about', 'About', 'info'],
   ];
@@ -825,7 +914,7 @@
     }
     const body = $('#settings-body');
     body.innerHTML = '';
-    ({ general: settingsGeneral, models: settingsModels, capabilities: settingsCapabilities, connectors: settingsConnectors, shortcuts: settingsShortcuts, about: settingsAbout })[state.section](body);
+    ({ general: settingsGeneral, models: settingsModels, capabilities: settingsCapabilities, connectors: settingsConnectors, plugins: settingsPlugins, memory: settingsMemory, shortcuts: settingsShortcuts, about: settingsAbout })[state.section](body);
   }
 
   const section = (title, hint) => { const s = el('section'); s.append(el('h2', '', esc(title))); if (hint) s.append(el('p', 'hint', esc(hint))); return s; };
@@ -1121,6 +1210,25 @@
   }
 
   /* Connectors: other apps' MCP servers whose tools Freehand can use (Blender, Figma...). */
+  function appLogo(c) {
+    const box = el('span', 'app-logo');
+    const site = c.site || (c.url && !/127\.0\.0\.1|localhost/.test(c.url) ? new URL(c.url).hostname.replace(/^(mcp|api)\./, '') : '');
+    if (!site) { box.append(ic('plug')); return box; }
+    box.append(siteIcon(`https://${site}`));
+    return box;
+  }
+  function fillToolsMenu(menu) {
+    const list = (state.settings.connectors || []);
+    menu.append(el('div', 'menu-label', 'Connectors'));
+    if (!list.length) menu.append(el('div', 'menu-hint', 'No apps connected yet.'));
+    for (const c of list) {
+      menu.append(menuItem(null, c.name, c.enabled === false ? 'Off for every task' : 'Freehand can use it', async () => {
+        try { await api('/connectors/' + c.id, { method: 'PUT', body: { enabled: c.enabled === false } }); await loadSettings(); toast(`${c.name} ${c.enabled === false ? 'on' : 'off'}`); }
+        catch (e) { toast(e.message, { error: true }); }
+      }, { checked: c.enabled !== false }));
+    }
+    menu.append(menuItem('plus', 'Add connectors', 'Linear, Notion, GitHub, Blender and more', () => openSettings('connectors')));
+  }
   function connectorTag(c) {
     const tag = el('span', 'tag');
     const st = c.status || {};
@@ -1151,20 +1259,22 @@
       for (const p of r.presets.filter((x) => !have.has(x.id))) {
         const row = el('div', 'own-model');
         const head = el('div', 'own-head');
-        const t = el('span', 'grow'); t.append(el('b', '', esc(p.name)), el('small', '', esc(p.command || p.url)));
-        const add = el('button', 'btn', 'Add'); add.type = 'button';
+        const t = el('span', 'grow'); t.append(el('b', '', esc(p.name)), el('small', '', esc(p.help.split(/(?<=\.)\s/)[0])));
+        const add = el('button', 'btn btn-primary', 'Connect'); add.type = 'button';
         let tok = null;
         if (p.token) { tok = el('input'); tok.type = 'password'; tok.autocomplete = 'off'; tok.placeholder = 'Access token'; tok.setAttribute('aria-label', `${p.name} access token`); }
         add.addEventListener('click', async () => {
           if (tok && !tok.value.trim()) return tok.focus();
           add.disabled = true;
-          const x = await call('', { method: 'POST', body: { name: p.name, type: p.type, command: p.command, url: p.url, token: tok ? tok.value.trim() : undefined } }, `${p.name} added`);
+          const x = await call('', { method: 'POST', body: { name: p.name, type: p.type, command: p.command, url: p.url, site: p.site, token: tok ? tok.value.trim() : undefined } });
           if (!x) { add.disabled = false; return; }
           open.add(x.added[0]); draw(x);
           if (p.signIn) signIn(x.added[0], p.name); else test(x.added[0]);
         });
-        head.append(ic('plug'), t, ...(tok ? [tok] : []), add);
-        row.append(head, el('p', 'hint', esc(p.help)));
+        head.append(appLogo(p), t, add);
+        row.append(head);
+        if (tok) { tok.classList.add('token-input'); row.append(tok); }
+        if (p.help.split(/(?<=\.)\s/).length > 1) row.append(el('p', 'hint', esc(p.help.split(/(?<=\.)\s/).slice(1).join(' '))));
         box.append(row);
       }
       const local = state.settings.active === 'ollama';
@@ -1176,7 +1286,7 @@
         d.addEventListener('toggle', () => { if (d.open) open.add(c.id); else open.delete(c.id); });
         const sum = el('summary');
         const g = el('span', 'grow'); g.append(el('b', '', esc(c.name)), el('small', '', esc(c.type === 'url' ? c.url : c.command)));
-        sum.append(ic('plug'), g, connectorTag(c));
+        sum.append(appLogo({ ...c, site: c.site || (r.presets.find((x) => x.id === c.id) || {}).site }), g, connectorTag(c));
         const b = el('div', 'provider-body');
         const st = c.status || {};
         const put = (patch, msg) => call('/' + c.id, { method: 'PUT', body: patch }, msg).then(draw);
@@ -1258,6 +1368,108 @@
     });
     own.append(settingRow('Paste a config', 'Apps often show their setup as JSON for Claude or Cursor. Paste it here as it is.', [paste, imp]));
 
+    box.append(el('p', 'hint', 'Loading'));
+    call('').then(draw);
+  }
+
+  /* Memory: the user's instructions for every task, and facts Freehand was asked to remember. */
+  function settingsMemory(body) {
+    const m = { on: true, instructions: '', facts: [], ...(state.settings.memory || {}) };
+    const sec = section('Memory', 'What Freehand knows about you in every task, like Claude\'s memory and Manus\'s knowledge. It saves a fact when you say "remember" or tell it a lasting preference.');
+    body.append(sec);
+    sec.append(toggleRow('Use memory', 'Off: tasks start without your instructions or saved facts, and nothing new is saved.', m.on !== false, (v) => patchSettings({ memory: { on: v } }).then(renderSettings)));
+    const ins = el('textarea'); ins.rows = 5; ins.value = m.instructions || ''; ins.placeholder = 'For example: I make PS1-style horror games in Godot. Keep answers short.'; ins.setAttribute('aria-label', 'Your instructions');
+    let t = null;
+    ins.addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => patchSettings({ memory: { instructions: ins.value } }), 600); });
+    sec.append(settingRow('Your instructions', 'Freehand follows these in every task.', [ins]));
+    const list = el('div', 'stack-sm');
+    if (!m.facts.length) list.append(el('p', 'hint', 'Nothing saved yet.'));
+    for (const f of m.facts.slice().reverse()) {
+      const row = el('div', 'fact-row');
+      const x = el('button', 'icon-btn'); x.type = 'button'; x.title = 'Forget this'; x.setAttribute('aria-label', `Forget: ${f.text}`); x.append(ic('x'));
+      x.addEventListener('click', () => patchSettings({ memory: { forget: f.id } }, 'Forgotten').then(renderSettings));
+      row.append(el('span', 'grow', esc(f.text)), x);
+      list.append(row);
+    }
+    sec.append(settingRow('Saved facts', `${m.facts.length} saved`, null, true), list);
+    if (m.facts.length) {
+      const all = el('button', 'btn btn-quiet', 'Forget everything'); all.type = 'button';
+      all.addEventListener('click', () => { if (confirm('Forget every saved fact?')) patchSettings({ memory: { forgetAll: true } }, 'Memory cleared').then(renderSettings); });
+      const a = el('div', 'row-actions'); a.append(all); sec.append(a);
+    }
+  }
+
+  /* Plugins: Claude Code plugins and skills (skills, slash commands, MCP servers), the same files Claude uses. */
+  function settingsPlugins(body) {
+    const intro = section('Plugins', 'Freehand uses your Claude plugins and skills: skills give it expert instructions for a kind of task, commands run as /name in the message box, and a plugin\'s apps can be added as connectors.');
+    const box = el('div', 'stack-sm');
+    intro.append(box);
+    const add = section('Add a plugin', 'From a GitHub repository that holds a Claude plugin (skills, commands or an .mcp.json).');
+    body.append(intro, add);
+    const call = async (path, opts, msg) => {
+      try { const r = await api('/plugins' + path, opts); if (msg) toast(msg); return r; }
+      catch (e) { toast(e.message, { error: true }); return null; }
+    };
+    let open = new Set();
+    const draw = (r) => {
+      if (!r) return;
+      box.innerHTML = '';
+      if (!r.plugins.length) box.append(el('p', 'hint', 'No plugins found. Plugins you install in Claude Code with /plugin, and skills in ~/.claude/skills, show up here.'));
+      for (const p of r.plugins) {
+        const d = el('details', 'provider');
+        d.open = open.has(p.id);
+        d.addEventListener('toggle', () => { if (d.open) open.add(p.id); else open.delete(p.id); });
+        const sum = el('summary');
+        const g = el('span', 'grow');
+        const bits = [p.skills.length && `${p.skills.length} skill${p.skills.length === 1 ? '' : 's'}`, p.commands.length && `${p.commands.length} command${p.commands.length === 1 ? '' : 's'}`, p.mcp.length && `${p.mcp.length} app${p.mcp.length === 1 ? '' : 's'}`].filter(Boolean).join(' · ');
+        g.append(el('b', '', esc(p.name)), el('small', '', esc([p.source === 'claude' ? 'From Claude Code' : 'Added from GitHub', bits].filter(Boolean).join(' · '))));
+        const tag = el('span', 'tag', p.on ? 'On' : 'Off');
+        if (p.on) tag.dataset.tone = 'ok';
+        sum.append(el('span', 'app-logo', ''), g, tag);
+        sum.firstChild.append(ic('puzzle-piece'));
+        const b = el('div', 'provider-body');
+        if (p.description) b.append(el('p', 'hint', esc(p.description)));
+        b.append(toggleRow('On', 'Freehand can use this plugin\'s skills and commands.', p.on, (v) => call('/' + encodeURIComponent(p.id), { method: 'PUT', body: { on: v } }, `${p.name} ${v ? 'on' : 'off'}`).then(draw)));
+        if (p.skills.length) {
+          const list = el('ul', 'plain-list');
+          for (const k of p.skills) { const li = el('li'); li.append(el('b', '', esc(k.name)), el('small', '', esc(k.description))); list.append(li); }
+          b.append(settingRow('Skills', 'Freehand loads one when a task matches it.', null, true), list);
+        }
+        if (p.commands.length) {
+          const list = el('ul', 'plain-list');
+          for (const c of p.commands) { const li = el('li'); li.append(el('b', '', esc('/' + c.name)), el('small', '', esc(c.description))); list.append(li); }
+          b.append(settingRow('Commands', 'Type them in the message box.', null, true), list);
+        }
+        if (p.mcp.length) {
+          const btns = p.mcp.map((m) => {
+            const x = el('button', 'btn', `Add ${m.name} as a connector`); x.type = 'button';
+            x.addEventListener('click', async () => {
+              try { await api('/connectors', { method: 'POST', body: m }); toast(`${m.name} added to Connectors`); x.disabled = true; } catch (e) { toast(e.message, { error: true }); }
+            });
+            return x;
+          });
+          b.append(settingRow('Apps', 'MCP servers this plugin brings. Add them to use their tools.', btns));
+        }
+        if (p.hooks) b.append(el('p', 'hint', 'This plugin also has hooks. Those only run inside Claude Code.'));
+        if (p.source === 'github') {
+          const rm = el('button', 'btn btn-quiet', 'Remove'); rm.type = 'button';
+          rm.addEventListener('click', () => call('/' + encodeURIComponent(p.id), { method: 'DELETE' }, `${p.name} removed`).then(draw));
+          const actions = el('div', 'row-actions'); actions.append(rm); b.append(actions);
+        }
+        d.append(sum, b);
+        box.append(d);
+      }
+    };
+    const repo = textField('GitHub repository', '', 'owner/repo', () => {});
+    const go = el('button', 'btn btn-primary', 'Add'); go.type = 'button';
+    go.addEventListener('click', async () => {
+      if (!repo.value.trim()) return repo.focus();
+      go.disabled = true; go.textContent = 'Downloading';
+      const r = await call('', { method: 'POST', body: { github: repo.value.trim() } });
+      go.disabled = false; go.textContent = 'Add';
+      if (r) { toast('Plugin added'); repo.value = ''; open.add(r.added); draw(r); }
+    });
+    add.append(settingRow('Repository', null, [repo, go]));
     box.append(el('p', 'hint', 'Loading'));
     call('').then(draw);
   }
@@ -1390,16 +1602,18 @@
     $('#model-chip').addEventListener('click', (e) => { e.stopPropagation(); if (state.settings) toggleMenu($('#model-chip'), $('#model-pop'), fillModelMenu); });
     $('#effort-chip').addEventListener('click', (e) => { e.stopPropagation(); if (state.settings) toggleMenu($('#effort-chip'), $('#model-pop'), fillEffortMenu); });
     $('#safety-chip').addEventListener('click', (e) => { e.stopPropagation(); if (state.settings) toggleMenu($('#safety-chip'), $('#model-pop'), fillSafetyMenu); });
+    $('#tools-chip').addEventListener('click', (e) => { e.stopPropagation(); if (state.settings) toggleMenu($('#tools-chip'), $('#model-pop'), fillToolsMenu); });
     document.addEventListener('click', (e) => { if (openMenu && !e.target.closest('.menu')) closeMenus(); });
     $('#settings-close').addEventListener('click', closeSettings);
 
     $('#composer').addEventListener('submit', (e) => { e.preventDefault(); submit($('#input').value); });
     $('#input').addEventListener('keydown', (e) => {
+      if (slashKey(e)) return;
       if (e.key !== 'Enter' || e.isComposing) return;
       const ctrlMode = state.settings && state.settings.ui.enterSends === 'ctrl';
       if (ctrlMode ? e.ctrlKey || e.metaKey : !e.shiftKey) { e.preventDefault(); submit($('#input').value); }
     });
-    $('#input').addEventListener('input', autosize);
+    $('#input').addEventListener('input', () => { autosize(); slashMenu(); });
     $('#attach').addEventListener('click', () => $('#attach-input').click());
     $('#attach-input').addEventListener('change', (e) => { attachFiles(e.target.files); e.target.value = ''; });
     $('#input').addEventListener('paste', (e) => { if (e.clipboardData && e.clipboardData.files.length) { e.preventDefault(); attachFiles(e.clipboardData.files); } });

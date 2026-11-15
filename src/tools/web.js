@@ -136,7 +136,9 @@ async function fetchPage(url, { signal, maxChars = 8000, offset = 0 }) {
   const total = text.length;
   const slice = text.slice(offset, offset + maxChars);
   const more = offset + maxChars < total ? `\n...[showing ${offset}-${offset + slice.length} of ${total} characters; call again with offset=${offset + maxChars} for more]` : '';
-  return { url: res.url, text: slice + more, total };
+  const t = /<title[^>]*>([^<]{1,200})<\/title>/i.exec(raw);
+  const title = t ? t[1].replace(/&amp;/g, '&').replace(/&#39;|&apos;/g, "'").replace(/&quot;/g, '"').replace(/\s+/g, ' ').trim() : '';
+  return { url: res.url, title, text: slice + more, total };
 }
 
 module.exports = { webSearch, fetchPage, githubTarget, parseDuckDuckGo, parseBing, truncate };

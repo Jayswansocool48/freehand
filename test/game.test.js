@@ -444,3 +444,34 @@ test('file_edit refuses an edit that only adds lines the file already has', asyn
   await tool('file_edit').run({ path: 'game.js', find: 'g.player = knight;', replace: 'g.player = knight;\ng.player.vel = new THREE.Vector3();' }, ctx);
   assert.match(fs.readFileSync(path.join(ws, 'game.js'), 'utf8'), /vel = new THREE/);
 });
+
+test('game design: a "rust like" request becomes a survival brief, and finishing checks it was built', async () => {
+  const { designBrief, missingFeatures } = require('../src/core/gamedesign');
+  const b = designBrief('make a 3d rust like game thats simple');
+  assert.deepEqual(b.features, ['gather', 'craft', 'build', 'hunger']);
+  assert.match(b.text, /survival game like Rust/);
+  assert.equal(designBrief('make a game like Hollow Knight').like, 'Hollow Knight');
+  assert.equal(designBrief('write a python script'), null);
+  assert.equal(missingFeatures(b, 'g.coins = []; // a coin collector').length, 4, 'a coin collector is not a survival game');
+  const { RECIPES_3D } = require('../src/tools/gamekit/recipes');
+  const all = ['gather', 'craft', 'build', 'hunger'].map((n) => RECIPES_3D[n].top + RECIPES_3D[n].update).join('\n');
+  assert.deepEqual(missingFeatures(b, all), [], 'the survival recipes satisfy the brief');
+
+  // The agent will not finish a coin collector when a Rust-like game was asked for.
+  let tries = 0;
+  const mock = await mockProvider((body) => {
+    if (!body.tools) return { message: text('{"title":"Rust","steps":["Write the game"]}') };
+    if (/game design for/i.test(body.messages[0].content)) tries++;
+    return { message: toolCall('finish', { message: 'Done' }) };
+  });
+  const workspace = fs.mkdtempSync(path.join(home, 'ws-'));
+  fs.writeFileSync(path.join(workspace, 'game.js'), 'g.coins = [];');
+  fs.writeFileSync(path.join(workspace, 'index.html'), '<script src="game.js"></script>');
+  const events = [];
+  const agent = new Agent({ settings: settingsFor(mock.url, { effort: 'high' }), workspace, signal: new AbortController().signal, history: [], emit: (t, d) => events.push({ type: t, ...d }), ask: async () => '', approve: async () => true });
+  agent.game.changed = false;
+  await agent.run('make a 3d rust like game thats simple');
+  mock.close();
+  assert.ok(tries > 0, 'the brief is in the instructions');
+  assert.ok(events.some((e) => e.type === 'notice' && /testing its work/.test(e.text)) || agent.history.some((h) => /does not do what was asked/.test(h.content || '')));
+});

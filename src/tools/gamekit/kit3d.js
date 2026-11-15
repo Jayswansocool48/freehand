@@ -22,11 +22,12 @@
  *   Kit.walk(obj, amount)  swings parts named leg/arm while moving (amount 0..1)
  *   Kit.face(obj, dir, dt) turns obj smoothly toward the direction {x, z}
  * Input: Kit.down('left') held, Kit.pressed('jump') this frame only. Actions: left right up down jump action run.
+ *   Other keys by code: Kit.key('KeyB') pressed this frame, Kit.keyDown('KeyC') held (KeyA..KeyZ, Digit1..Digit9, Tab).
  *   Space = jump; click, Enter, F, X or Z = action. Kit.moveInput() = {x, z} from WASD/arrows, relative to the camera.
  * Physics: Kit.solid(obj, moving) makes obj a wall or platform. Kit.move(obj, dt, {gravity, floor}) moves obj by
  *   obj.vel (a THREE.Vector3), adds gravity, stops at solids and at the floor (y = 0; floor: null for none).
  *   After it: obj.onGround, obj.hitWall. obj.size = {w, h, d} sets the body size (default 0.8 x 1.7 x 0.8).
- * Kit.camera and Kit.scene are the three.js camera and scene (Kit.camera.add(gun) puts a gun in view).
+ * Kit.camera and Kit.scene are the three.js camera and scene (Kit.camera.add(gun) puts a gun in view). Kit.sun and Kit.hemi are the lights.
  * Kit.hit(a, b) boxes touch   Kit.near(a, b, dist)   Kit.aim(list) first object in list under the screen centre
  * Kit.addScore(n), Kit.hud('Lives 3') (Kit.hud('Time 30', 'timer') adds a second line), Kit.sfx('jump' | 'coin' | 'hit' | 'boom' | 'power' | 'click' | 'shoot'),
  * Kit.burst(position, color), Kit.shake(amount), Kit.rand(a, b), Kit.clamp(v, lo, hi)
@@ -49,6 +50,7 @@ const STEP = 1 / 60;
 const held = new Set();
 const codes = new Set();
 let fresh = new Set();
+const freshCodes = new Set(); // raw key codes pressed this frame, for Kit.key('KeyB')
 let cfg = null;
 let audio = null;
 let shakeAmt = 0;
@@ -74,15 +76,15 @@ const camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerH
 camera.rotation.order = 'YXZ';
 scene.add(camera); // so things can be attached to it, like a first-person gun
 const world = new THREE.Group();
-g.scene = world; // models often write g.scene.add(obj): same as Kit.add, cleared each round
 scene.add(world);
-scene.add(new THREE.HemisphereLight('#ffffff', '#4a5a3a', 1.3));
+const hemi = new THREE.HemisphereLight('#ffffff', '#4a5a3a', 1.3);
+scene.add(hemi);
 const sun = new THREE.DirectionalLight('#ffffff', 2.2);
 sun.castShadow = true;
 sun.shadow.mapSize.set(1024, 1024);
 Object.assign(sun.shadow.camera, { left: -30, right: 30, top: 30, bottom: -30, near: 1, far: 120 });
 scene.add(sun, sun.target);
-g.scene = scene;
+g.scene = world; // models often write g.scene.add(obj): the same as Kit.add, cleared each round (Kit.scene is the real scene)
 g.camera = camera;
 g.world = world;
 
@@ -348,6 +350,7 @@ function moveInput() {
 
 function attachInput() {
   window.addEventListener('keydown', (e) => {
+    if (!e.repeat && !codes.has(e.code)) freshCodes.add(e.code);
     codes.add(e.code);
     const name = KEYS[e.code];
     if (!name) return;
@@ -415,6 +418,7 @@ function begin() {
   g.time = 0;
   held.clear();
   fresh = new Set();
+  freshCodes.clear();
   build();
   overlay.hidden = true;
   sfx('click');
@@ -563,6 +567,7 @@ function frame() {
     for (const p of particles) { p.v.y -= 15 * STEP; p.m.position.addScaledVector(p.v, STEP); p.life -= STEP; p.m.scale.setScalar(Math.max(0.01, p.life / 0.7)); }
     particles = particles.filter((p) => { if (p.life > 0) return true; world.remove(p.m); return false; });
     fresh.clear();
+    freshCodes.clear();
     acc -= STEP;
     steps++;
   }
@@ -616,11 +621,13 @@ export const Kit = {
   ring: (...a) => add(make.ring(...a)),
   shape: make, // the same shapes without adding them to the world, e.g. as a Kit.model fallback
   group(x, y, z) { const o = new THREE.Group(); o.position.set(x || 0, y || 0, z || 0); return add(o); },
-  camera, scene,
+  camera, scene, sun, hemi, // sun and hemi are the lights: dim them for night
   ground, add, remove, model, anim, walk, face, solid, move, hit, near, aim, moveInput, burst, shake, sfx, gameOver,
   hud(text, line = 'main') { hudLines[line] = String(text); },
   down: (name) => held.has(name),
   pressed: (name) => fresh.has(name),
+  key: (code) => freshCodes.has(code), // any key by its code, this frame only: Kit.key('KeyB'), Kit.key('Digit1')
+  keyDown: (code) => codes.has(code), // any key by its code, held
   addScore(n) { g.score += n == null ? 1 : n; },
   rand: (a, b) => a + Math.random() * (b - a),
   clamp: (v, lo, hi) => Math.max(lo, Math.min(hi, v)),

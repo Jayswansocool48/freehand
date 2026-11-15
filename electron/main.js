@@ -26,6 +26,7 @@ async function createWindow() {
     minHeight: 600,
     backgroundColor: '#efefeb',
     title: 'Freehand',
+    icon: path.join(__dirname, '..', 'build', 'icon.png'), // the window and taskbar icon on Linux
     autoHideMenuBar: true,
     // No OS title bar: the app draws its own top bar and only the native min / max / close buttons are overlaid.
     titleBarStyle: 'hidden',

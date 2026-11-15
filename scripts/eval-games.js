@@ -29,6 +29,7 @@ const CASES = {
   platformer3d: { ask: 'make a 3d platformer with a robot', inputs: ['key KeyW 500', 'key Space', 'key KeyW 400'] },
   fps: { ask: 'make a first person shooter with zombies', inputs: ['key KeyW 800', 'key ArrowLeft 400', 'key Enter', 'key Enter'] },
   racer: { ask: 'make a racing game with a red sports car', inputs: ['key ArrowUp 2000', 'key ArrowLeft 500'] },
+  rust: { ask: 'make a 3d rust like game thats simple', inputs: ['key KeyW 800', 'tap KeyF 4 250', 'key KeyD 500'] },
 };
 
 function settings() {

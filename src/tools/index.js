@@ -95,7 +95,7 @@ function buildTools() {
       label: (a) => `Reading ${a.url}`,
       async run(a, ctx) {
         const r = await fetchPage(String(a.url || ''), { signal: ctx.signal, maxChars: Math.min(20000, Number(a.max_chars) || 8000), offset: Number(a.offset) || 0 });
-        return `URL: ${r.url}\n\n${r.text}`;
+        return `URL: ${r.url}\n${r.title ? `Title: ${r.title}\n` : ''}\n${r.text}`;
       },
     },
     {
@@ -251,8 +251,8 @@ function buildTools() {
           (kind === '3d'
             ? 'game.js shape: `import { Kit, THREE } from \'./kit3d.js\';` then function init(g) { build the ground, objects and g.player (with g.player.vel = new THREE.Vector3()) }, function update(g, dt) { move things, check touches, Kit.addScore, Kit.gameOver }, and last Kit.start({ title: document.title, hint: \'how to play\', camera: \'third\', init, update }). ' +
               'Walking: const dir = Kit.moveInput(); p.vel.x = dir.x * 6; p.vel.z = dir.z * 6; Kit.move(p, dt); Kit.face(p, dir, dt). Do not also set p.position yourself. ' +
-              'Things to collect or dodge: keep your own list. In init: g.coins = []; const c = Kit.model(\'assets/coin.glb\', Kit.shape.cone(0.3, 0.6, \'#ffd700\')); c.position.set(x, 0, z); g.coins.push(c). ' +
-              'In update: for (const c of [...g.coins]) if (Kit.near(g.player, c, 1)) { Kit.remove(c); g.coins.splice(g.coins.indexOf(c), 1); Kit.addScore(1); Kit.sfx(\'coin\'); }. ' +
+              'Many things of one kind (enemies, trees, pickups): keep your own list, g.things = [], push each one in init, and loop over a copy in update, e.g. for (const t of [...g.things]) if (Kit.near(g.player, t, 1.5)) { ... }. Kit.remove(t) takes one out of the world. ' +
+              'Build the game that was asked for: its own world, rules and goal. For survival, shooting, platforms and other common features, game_recipe has tested code. ' +
               'Kit.model takes a shape (Kit.shape.box/sphere/cone...), not a function.'
             : 'game.js shape: function init(g) { reset the round }, function update(g, dt) { move things, Kit.addScore, Kit.gameOver }, function draw(g, ctx) { draw }, and last Kit.start({ width: 480, height: 640, init, update, draw }).') +
           ' Make models with make_model (3D) or sprites with make_sprite (2D); game_recipe has tested code for common features.' +
