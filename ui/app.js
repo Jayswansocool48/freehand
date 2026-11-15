@@ -800,6 +800,7 @@
     ['general', 'General', 'user-circle'],
     ['models', 'Models', 'cpu'],
     ['capabilities', 'Capabilities', 'puzzle-piece'],
+    ['connectors', 'Connectors', 'plugs-connected'],
     ['shortcuts', 'Shortcuts', 'keyboard'],
     ['about', 'About', 'info'],
   ];
@@ -824,7 +825,7 @@
     }
     const body = $('#settings-body');
     body.innerHTML = '';
-    ({ general: settingsGeneral, models: settingsModels, capabilities: settingsCapabilities, shortcuts: settingsShortcuts, about: settingsAbout })[state.section](body);
+    ({ general: settingsGeneral, models: settingsModels, capabilities: settingsCapabilities, connectors: settingsConnectors, shortcuts: settingsShortcuts, about: settingsAbout })[state.section](body);
   }
 
   const section = (title, hint) => { const s = el('section'); s.append(el('h2', '', esc(title))); if (hint) s.append(el('p', 'hint', esc(hint))); return s; };
@@ -1117,6 +1118,120 @@
     const browser = section('Browser');
     browser.append(toggleRow('Show the browser window', 'Off keeps it hidden. Freehand\'s computer panel still shows screenshots.', !s.browserHeadless, (v) => patchSettings({ browserHeadless: !v })));
     body.append(safety, web, browser);
+  }
+
+  /* Connectors: other apps' MCP servers whose tools Freehand can use (Blender, Figma...). */
+  function connectorTag(c) {
+    const tag = el('span', 'tag');
+    const st = c.status || {};
+    if (c.enabled === false) tag.textContent = 'Off';
+    else if (st.state === 'connected') { tag.dataset.tone = 'ok'; tag.append(el('span', 'dot'), document.createTextNode(`${st.tools.length - (c.disabledTools || []).filter((n) => st.tools.some((t) => t.name === n)).length} tools`)); }
+    else if (st.state === 'error') { tag.dataset.tone = 'bad'; tag.textContent = 'Can\'t connect'; }
+    else if (st.state === 'connecting') tag.textContent = 'Connecting';
+    else tag.textContent = 'Connects when a task starts';
+    return tag;
+  }
+  function settingsConnectors(body) {
+    const intro = section('Connectors', 'Connect other apps so Freehand can use them: Blender to build 3D scenes and models, Figma to read your designs. Any app with an MCP server works.');
+    const box = el('div', 'stack-sm');
+    intro.append(box);
+    const own = section('Add your own', 'For any other app with an MCP server. Its instructions give either a command to run or an address.');
+    body.append(intro, own);
+    let open = new Set();
+    const call = async (path, opts, msg) => {
+      try { const r = await api('/connectors' + path, opts); if (msg) toast(msg); return r; }
+      catch (e) { toast(e.message, { error: true }); return null; }
+    };
+    const draw = (r) => {
+      if (!r) return;
+      box.innerHTML = '';
+      const have = new Set(r.connectors.map((c) => c.id));
+      for (const p of r.presets.filter((x) => !have.has(x.id))) {
+        const row = el('div', 'own-model');
+        const head = el('div', 'own-head');
+        const t = el('span', 'grow'); t.append(el('b', '', esc(p.name)), el('small', '', esc(p.command || p.url)));
+        const add = el('button', 'btn', 'Add'); add.type = 'button';
+        add.addEventListener('click', async () => { add.disabled = true; const x = await call('', { method: 'POST', body: { name: p.name, type: p.type, command: p.command, url: p.url } }, `${p.name} added`); if (x) { open.add(x.added[0]); draw(x); test(x.added[0]); } else add.disabled = false; });
+        head.append(ic('plug'), t, add);
+        row.append(head, el('p', 'hint', esc(p.help)));
+        box.append(row);
+      }
+      const local = state.settings.active === 'ollama';
+      const total = r.connectors.filter((c) => c.enabled !== false).reduce((n, c) => n + (c.status.tools || []).filter((t) => !(c.disabledTools || []).includes(t.name)).length, 0);
+      if (local && total > 12) box.append(el('p', 'hint', esc(`${total} connector tools are on. Small local models pick tools better when fewer are on: open a connector and turn off the tools you don't need.`)));
+      for (const c of r.connectors) {
+        const d = el('details', 'provider');
+        d.open = open.has(c.id);
+        d.addEventListener('toggle', () => { if (d.open) open.add(c.id); else open.delete(c.id); });
+        const sum = el('summary');
+        const g = el('span', 'grow'); g.append(el('b', '', esc(c.name)), el('small', '', esc(c.type === 'url' ? c.url : c.command)));
+        sum.append(ic('plug'), g, connectorTag(c));
+        const b = el('div', 'provider-body');
+        const st = c.status || {};
+        const put = (patch, msg) => call('/' + c.id, { method: 'PUT', body: patch }, msg).then(draw);
+        b.append(toggleRow('On', 'Freehand can use this app\'s tools in every task.', c.enabled !== false, (v) => put({ enabled: v }, v ? `${c.name} on` : `${c.name} off`)));
+        b.append(toggleRow('Run without asking', 'Off: Freehand asks before each action that changes something in the app. Actions that only read never ask.', !!c.trust, (v) => put({ trust: v })));
+        const testBtn = el('button', 'btn', st.state === 'connected' ? 'Reconnect' : 'Connect and test'); testBtn.type = 'button';
+        testBtn.addEventListener('click', () => test(c.id));
+        const info = st.state === 'error' ? el('p', 'hint error-text', esc(st.error)) : el('p', 'hint', esc(st.state === 'connected' ? `Connected${st.server ? ` to ${st.server}` : ''}.` : 'Not connected yet.'));
+        const extra = [c.env && c.env.length ? `Settings: ${c.env.join(', ')}` : '', c.headers && c.headers.length ? `Headers: ${c.headers.join(', ')}` : ''].filter(Boolean).join(' · ');
+        b.append(settingRow('Connection', extra || null, [testBtn, info]));
+        if ((st.tools || []).length) {
+          const list = el('div', 'stack-sm');
+          for (const t of st.tools) {
+            list.append(toggleRow(t.name.replace(/_/g, ' '), t.description.split(/(?<=\.)\s/)[0].slice(0, 160), !(c.disabledTools || []).includes(t.name), (v) => {
+              const next = (c.disabledTools || []).filter((n) => n !== t.name);
+              if (!v) next.push(t.name);
+              c.disabledTools = next;
+              put({ disabledTools: next });
+            }));
+          }
+          b.append(settingRow('Tools', 'Turn off the ones Freehand should not use.', null, true), list);
+        }
+        const rm = el('button', 'btn btn-quiet', 'Remove'); rm.type = 'button';
+        rm.addEventListener('click', () => call('/' + c.id, { method: 'DELETE' }, `${c.name} removed`).then(draw));
+        const actions = el('div', 'row-actions'); actions.append(rm);
+        b.append(actions);
+        d.append(sum, b);
+        box.append(d);
+      }
+      if (!r.connectors.length) box.append(el('p', 'hint', 'No connectors yet.'));
+    };
+    const test = async (id) => {
+      const r = await call(`/${id}/test`, { method: 'POST' });
+      draw(r);
+      const c = r && r.connectors.find((x) => x.id === id);
+      if (c && c.status.state === 'connected') toast(`${c.name} connected: ${c.status.tools.length} tools`);
+      else if (c) toast(`${c.name}: ${c.status.error || 'could not connect'}`, { error: true });
+    };
+
+    // Add your own: a command or an address, or a pasted config.
+    let kind = 'command';
+    const name = textField('Name', '', 'Name, like Blender', () => {});
+    const cmd = textField('Command', '', 'npx -y some-mcp-server', () => {});
+    const url = textField('Address', '', 'http://127.0.0.1:3845/mcp', () => {}); url.hidden = true;
+    const token = el('input'); token.type = 'password'; token.autocomplete = 'off'; token.placeholder = 'Sign-in token, if the app gives one'; token.setAttribute('aria-label', 'Sign-in token'); token.hidden = true;
+    const kinds = segmented('Connector type', [['command', 'Command'], ['url', 'Address']], kind, (v) => { kind = v; cmd.hidden = v !== 'command'; url.hidden = token.hidden = v !== 'url'; });
+    const add = el('button', 'btn btn-primary', 'Add'); add.type = 'button';
+    add.addEventListener('click', async () => {
+      const body = { name: name.value.trim(), type: kind, command: cmd.value.trim(), url: url.value.trim(), token: token.value.trim() };
+      if (!body.name) return name.focus();
+      const r = await call('', { method: 'POST', body }, `${body.name} added`);
+      if (r) { name.value = cmd.value = url.value = token.value = ''; open.add(r.added[0]); draw(r); test(r.added[0]); }
+    });
+    own.append(settingRow('Connector', 'A command starts a program on this computer. An address connects to an app that is already running.', [kinds, name, cmd, url, token, add]));
+    const paste = el('textarea'); paste.rows = 5; paste.spellcheck = false; paste.setAttribute('aria-label', 'Connector config');
+    paste.placeholder = '{ "mcpServers": { "blender": { "command": "uvx", "args": ["blender-mcp"] } } }';
+    const imp = el('button', 'btn', 'Add from config'); imp.type = 'button';
+    imp.addEventListener('click', async () => {
+      if (!paste.value.trim()) return paste.focus();
+      const r = await call('', { method: 'POST', body: { import: paste.value } });
+      if (r) { paste.value = ''; toast(`Added ${r.added.length} connector${r.added.length === 1 ? '' : 's'}`); r.added.forEach((id) => open.add(id)); draw(r); r.added.forEach(test); }
+    });
+    own.append(settingRow('Paste a config', 'Apps often show their setup as JSON for Claude or Cursor. Paste it here as it is.', [paste, imp]));
+
+    box.append(el('p', 'hint', 'Loading'));
+    call('').then(draw);
   }
 
   const SHORTCUTS = [

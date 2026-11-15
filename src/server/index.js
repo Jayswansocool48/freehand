@@ -11,6 +11,7 @@ const { safePath } = require('../core/util');
 const { TaskStore } = require('./tasks');
 const { previewUrl, ensurePreview } = require('./preview');
 const ollama = require('../core/ollama');
+const mcp = require('../core/mcp');
 
 const UI_DIR = path.join(__dirname, '..', '..', 'ui');
 const MIME = {
@@ -104,6 +105,50 @@ function startServer({ port = 0, host = '127.0.0.1', token = crypto.randomBytes(
         saveSettings(next);
       }
       return send(res, 200, { settings: publicSettings(loadSettings()), presets: PROVIDER_PRESETS, platform: process.platform });
+    }
+    if (parts[0] === 'connectors') {
+      const settings = loadSettings();
+      const list = settings.connectors || [];
+      const view = () => ({
+        presets: mcp.PRESETS,
+        connectors: publicSettings(loadSettings()).connectors.map((c) => ({ ...c, status: mcp.manager.statusOf(c.id) })),
+      });
+      const save = (next) => saveSettings({ ...settings, connectors: next });
+      if (!parts[1]) {
+        if (method === 'GET') return send(res, 200, view());
+        if (method !== 'POST') return send(res, 405, { error: 'Use GET or POST' });
+        const body = await readBody(req);
+        let added;
+        try {
+          const incoming = typeof body.import === 'string' ? mcp.parseImport(body.import) : [body];
+          added = [];
+          for (const c of incoming) added.push(mcp.normalize(c, [...list, ...added]));
+        } catch (e) { return send(res, 400, { error: e.message }); }
+        save([...list, ...added]);
+        return send(res, 200, { ...view(), added: added.map((c) => c.id) });
+      }
+      const i = list.findIndex((c) => c.id === parts[1]);
+      if (i < 0) return send(res, 404, { error: 'No such connector' });
+      if (method === 'DELETE') {
+        mcp.manager.drop(parts[1]);
+        save(list.filter((c) => c.id !== parts[1]));
+        return send(res, 200, view());
+      }
+      if (method === 'PUT') {
+        const p = await readBody(req);
+        const c = { ...list[i] };
+        for (const k of ['enabled', 'trust']) if (typeof p[k] === 'boolean') c[k] = p[k];
+        if (Array.isArray(p.disabledTools)) c.disabledTools = p.disabledTools.map(String).slice(0, 500);
+        if (typeof p.name === 'string' && p.name.trim()) c.name = p.name.replace(/[^\p{L}\p{N} ._-]/gu, '').trim().slice(0, 40) || c.name;
+        if (c.enabled === false) mcp.manager.drop(c.id);
+        save(list.map((x, j) => (j === i ? c : x)));
+        return send(res, 200, view());
+      }
+      if (method === 'POST' && parts[2] === 'test') {
+        try { await mcp.manager.test(list[i]); } catch { /* the status carries the error */ }
+        return send(res, 200, view());
+      }
+      return send(res, 405, { error: 'Not allowed' });
     }
     if (parts[0] === 'info') return send(res, 200, { version, dataDir: homeDir(), platform: process.platform, desktop: !!process.versions.electron });
     if (parts[0] === 'ollama') {
@@ -228,7 +273,7 @@ function startServer({ port = 0, host = '127.0.0.1', token = crypto.randomBytes(
     server.on('error', reject);
     server.listen(port, host, () => {
       const addr = server.address();
-      resolve({ server, store, token, port: addr.port, url: `http://127.0.0.1:${addr.port}/?token=${token}`, close: () => { for (const t of store.tasks.values()) t.stop(); server.close(); } });
+      resolve({ server, store, token, port: addr.port, url: `http://127.0.0.1:${addr.port}/?token=${token}`, close: () => { for (const t of store.tasks.values()) t.stop(); mcp.manager.closeAll(); server.close(); } });
     });
   });
 }

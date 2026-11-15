@@ -72,6 +72,8 @@ function defaultSettings() {
     contextChars: 48000,
     browserHeadless: true,
     search: { provider: 'duckduckgo', braveKey: '' },
+    // Connectors: other apps' MCP servers (Blender, Figma...) whose tools the agent can use. See src/core/mcp.js.
+    connectors: [],
     // font: '' means "use the operating system's UI font"; any installed font name can be typed in.
     ui: { theme: 'system', font: '', monoFont: '', chatFont: 'sans', enterSends: 'enter', reduceMotion: false },
   };
@@ -121,6 +123,8 @@ function publicSettings(settings) {
   }
   s.search.hasBraveKey = !!settings.search.braveKey || !!process.env.BRAVE_API_KEY;
   delete s.search.braveKey;
+  // Connector env vars and headers often hold tokens: the page only learns their names.
+  s.connectors = (s.connectors || []).map((c) => ({ ...c, env: Object.keys(c.env || {}), headers: Object.keys(c.headers || {}) }));
   return s;
 }
 

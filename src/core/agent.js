@@ -7,6 +7,7 @@ const { BrowserSession } = require('../tools/browser');
 const { stripThinking, extractJson, truncate, safePath } = require('./util');
 const { templateFor, gameTitle } = require('./genres');
 const { TEMPLATES } = require('../tools/gamekit');
+const mcp = require('./mcp');
 
 const TOOL_RESULT_FOR_MODEL = 6000;
 const TOOL_RESULT_FOR_UI = 3500;
@@ -24,7 +25,7 @@ const EFFORT = {
 };
 const effortOf = (settings) => EFFORT[settings.effort] || EFFORT.high;
 
-function plannerPrompt(effort) {
+function plannerPrompt(effort, apps = '') {
   return `You are the planning module of Freehand, an autonomous agent that can search the web, browse, read/write files and run code on the user's computer.
 Given the user's request, reply with ONLY a JSON object, no other text:
 - If the request needs real work: {"title": "<3-6 word title>", "steps": ["<imperative step>", ...]} with ${effort.steps} concrete steps.
@@ -32,10 +33,10 @@ Given the user's request, reply with ONLY a JSON object, no other text:
 Prefer the fewest steps that get a verified result. Do not include a "write the final answer" step; finishing is automatic.
 Games: start with "Start from the <${Object.keys(TEMPLATES).join('|')}> game_template", then steps that change game.js to fit the request (rules, looks, sprites with make_sprite, 3D models with make_model), then end with "Play-test with play_test and fix everything it reports". Do not plan web searches for how to code a game; the templates are better.
 If the request says a game template is already installed, do not plan to start one: plan only the changes the request asks for (look, sprites, rules, numbers in TUNING), then the play-test. A request that only names a game ("make snake") needs no rule changes: plan a sprite or look change (a model with make_model for 3D) and the play-test.
-${effort.work}`;
+${apps ? `Connected apps the agent can use through their tools: ${apps}. When the request is about one of them (a Blender scene, a Figma design), plan steps that use that app.\n` : ''}${effort.work}`;
 }
 
-function systemPrompt({ plan, mode, tools, effort, files }) {
+function systemPrompt({ plan, mode, tools, effort, files, apps }) {
   const lines = [
     `You are Freehand, an autonomous agent that completes tasks end to end on the user's own computer. Today is ${new Date().toDateString()}. Platform: ${process.platform}.`,
     `Your workspace folder is the current directory; every file path you use is relative to it. Save deliverables (reports, code, data, HTML) as files there, not just in chat.`,
@@ -65,6 +66,12 @@ function systemPrompt({ plan, mode, tools, effort, files }) {
     '- Only say you fixed or changed something after a file_write or file_edit actually did it. Reading code and testing is not fixing.',
     '- Make the controls and goal clear on screen, and let the player restart.',
     '- If a model or file you need is missing, make it or use a simple shape. Never leave a game broken because an asset failed to load.',
+    ...(apps ? [
+      '',
+      'Connected apps:',
+      `- Tools named <app>__<tool> come from apps the user connected (${apps}). Use them when the request is about that app. They act on the real app, so check what is there (scene or file info) before changing it.`,
+      '- To use a model made in Blender in a game, export it as .glb into the workspace assets/ folder (use the absolute workspace path for the export), then load it with Kit.model.',
+    ] : []),
     '',
     'Files already in the workspace:',
     files || '(none yet)',
@@ -115,7 +122,7 @@ class Agent {
    * @param {(req:object)=>Promise<boolean>} o.approve
    * @param {Array} o.history     prior conversation (mutated)
    */
-  constructor({ settings, workspace, emit, signal, ask, approve, history }) {
+  constructor({ settings, workspace, emit, signal, ask, approve, history, connectors }) {
     this.settings = settings;
     this.workspace = workspace;
     this.emit = emit;
@@ -124,6 +131,7 @@ class Agent {
     this.approve = approve;
     this.history = history || [];
     this.tools = buildTools();
+    this.connectors = connectors || mcp.manager;
     this.toolByName = Object.fromEntries(this.tools.map((t) => [t.name, t]));
     this.plan = [];
     this.nativeBroken = new Set(); // provider ids that rejected native tools
@@ -208,7 +216,7 @@ class Agent {
   async planTask(userText) {
     const recent = this.history.slice(-6).map((h) => `${h.role}: ${truncate(h.content, 600, false)}`).join('\n');
     const messages = [
-      { role: 'system', content: plannerPrompt(this.effort) },
+      { role: 'system', content: plannerPrompt(this.effort, this.appNames()) },
       { role: 'user', content: (recent ? `Earlier in this conversation:\n${recent}\n\n` : '') + `Request:\n${userText}` },
     ];
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -271,6 +279,32 @@ class Agent {
     return null;
   }
 
+  /** Adds the tools of every enabled connector (Blender, Figma...) for this request. */
+  async addConnectorTools() {
+    if (!(this.settings.connectors || []).some((c) => c.enabled !== false)) return;
+    const extra = await this.connectors.toolsFor(this.settings, (t) => this.notice(t, 'warn'));
+    for (const t of extra) {
+      if (this.toolByName[t.name]) continue;
+      this.tools.push(t);
+      this.toolByName[t.name] = t;
+    }
+  }
+
+  appNames() {
+    return [...new Set(this.tools.filter((t) => t.connector).map((t) => t.connector))].join(', ');
+  }
+
+  /** Saves an image a connector returned (a Blender viewport shot, a Figma frame) into the workspace. */
+  saveImage(base, img) {
+    const ext = /jpe?g/.test(img.mimeType) ? 'jpg' : /webp/.test(img.mimeType) ? 'webp' : 'png';
+    const rel = `connector-images/${base.replace(/[^\w.-]/g, '_')}-${Date.now()}.${ext}`;
+    const file = safePath(this.workspace, rel);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, Buffer.from(img.data, 'base64'));
+    this.emit('file', { path: rel });
+    return rel;
+  }
+
   isKitGame() {
     return ['kit.js', 'kit3d.js'].some((f) => fs.existsSync(path.join(this.workspace, f)));
   }
@@ -280,7 +314,7 @@ class Agent {
     const names = this.tools.map((t) => t.name);
     let files = '';
     try { files = truncate(listDir(this.workspace, '.', 3), 1500); } catch { /* workspace not readable */ }
-    const messages = [{ role: 'system', content: systemPrompt({ plan: this.plan, mode, tools: this.tools, effort: this.effort, files }) }, ...this.render(mode)];
+    const messages = [{ role: 'system', content: systemPrompt({ plan: this.plan, mode, tools: this.tools, effort: this.effort, files, apps: this.appNames() }) }, ...this.render(mode)];
     let r;
     try {
       r = await this.callModel(messages, mode === 'native' ? this.tools : null);
@@ -331,6 +365,7 @@ class Agent {
     this.history.push({ role: 'user', content: userText, ...(turn === undefined ? {} : { turn }) });
     this.emit('status', { status: 'running' });
     try {
+      await this.addConnectorTools();
       const started = await this.autoTemplate(userText);
       const planned = await this.planTask(started ? `${userText}\n\n(${started})` : userText);
       if (planned.title) this.emit('title', { title: String(planned.title).slice(0, 80) });
@@ -510,6 +545,7 @@ class Agent {
       emit: this.emit,
       ask: (q) => this.askUser(q),
       browser: () => this.browser(),
+      saveImage: (base, img) => this.saveImage(base, img),
     };
   }
 
