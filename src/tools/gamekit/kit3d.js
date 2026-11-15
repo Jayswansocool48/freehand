@@ -74,6 +74,7 @@ const camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerH
 camera.rotation.order = 'YXZ';
 scene.add(camera); // so things can be attached to it, like a first-person gun
 const world = new THREE.Group();
+g.scene = world; // models often write g.scene.add(obj): same as Kit.add, cleared each round
 scene.add(world);
 scene.add(new THREE.HemisphereLight('#ffffff', '#4a5a3a', 1.3));
 const sun = new THREE.DirectionalLight('#ffffff', 2.2);
@@ -134,6 +135,7 @@ function remove(obj) {
 }
 
 function ground(size = 80, color = '#7cc46a', color2) {
+  if (Array.isArray(size)) size = Math.max(...size.map(Number).filter((n) => n > 0), 1); // Kit.ground([20, 20])
   const c = document.createElement('canvas');
   c.width = c.height = 64;
   const x = c.getContext('2d');
@@ -170,7 +172,11 @@ function loadModel(url) {
 
 function model(url, fallback) {
   const holder = new THREE.Group();
-  const fb = fallback || make.box(0.8, 1.6, 0.8, '#ff00cc');
+  if (typeof fallback === 'function') fallback = fallback(); // Kit.model(url, () => Kit.box(...))
+  const fb = fallback && fallback.isObject3D ? fallback : make.box(0.8, 1.6, 0.8, '#ff00cc');
+  // A fallback made with Kit.box(..., x, y, z) puts the model there, not at the origin
+  holder.position.copy(fb.position);
+  fb.position.set(0, 0, 0);
   holder.add(fb);
   add(holder);
   loadModel(url).then((gltf) => {

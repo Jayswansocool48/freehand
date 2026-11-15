@@ -169,6 +169,24 @@ function installTemplate(workspace, kind, { title = 'My Game', overwrite = false
   return written;
 }
 
+/**
+ * Copies only the engine (index.html plus kit.js or kit3d.js) so the model writes game.js itself.
+ * Returns the list of files written.
+ */
+function installEngine(workspace, kind, { title = 'My Game' } = {}) {
+  const three = kind === '3d';
+  const files = { 'index.html': path.join(DIR, three ? 'index3d.html' : 'index.html'), [three ? 'kit3d.js' : 'kit.js']: path.join(DIR, three ? 'kit3d.js' : 'kit.js') };
+  const safeTitle = String(title).replace(/[<>&"]/g, '').slice(0, 60) || 'My Game';
+  const written = [];
+  for (const [f, src] of Object.entries(files)) {
+    let text = fs.readFileSync(src, 'utf8');
+    if (f === 'index.html') text = text.split('{{TITLE}}').join(safeTitle);
+    fs.writeFileSync(path.join(workspace, f), text, 'utf8');
+    written.push(f);
+  }
+  return written;
+}
+
 /* ---------- sprites ---------- */
 
 const NAMED = {
@@ -262,4 +280,4 @@ function makeSprite({ pixels, palette = {}, scale = 1, frames }) {
 
 const { RECIPES, RECIPES_3D } = require('./recipes');
 
-module.exports = { TEMPLATES, RECIPES, RECIPES_3D, MODELS_3D, installTemplate, makeSprite, encodePng };
+module.exports = { TEMPLATES, RECIPES, RECIPES_3D, MODELS_3D, installTemplate, installEngine, makeSprite, encodePng };

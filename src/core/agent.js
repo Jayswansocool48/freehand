@@ -5,13 +5,12 @@ const { chat } = require('./providers');
 const { buildTools, listDir } = require('../tools');
 const { BrowserSession } = require('../tools/browser');
 const { stripThinking, extractJson, truncate, safePath } = require('./util');
-const { templateFor, gameTitle } = require('./genres');
 const { TEMPLATES } = require('../tools/gamekit');
 const mcp = require('./mcp');
 
 const TOOL_RESULT_FOR_MODEL = 6000;
 const TOOL_RESULT_FOR_UI = 3500;
-const WRITES = ['file_write', 'file_edit', 'game_template', 'make_sprite', 'make_model'];
+const WRITES = ['file_write', 'file_edit', 'game_engine', 'game_template', 'make_sprite', 'make_model'];
 
 /**
  * Effort levels, like Claude's: how much work Freehand puts into one request.
@@ -31,8 +30,7 @@ Given the user's request, reply with ONLY a JSON object, no other text:
 - If the request needs real work: {"title": "<3-6 word title>", "steps": ["<imperative step>", ...]} with ${effort.steps} concrete steps.
 - If it is a simple question or chat that needs no tools: {"title": "<3-6 word title>", "answer": "<your complete answer in Markdown>"}.
 Prefer the fewest steps that get a verified result. Do not include a "write the final answer" step; finishing is automatic.
-Games: start with "Start from the <${Object.keys(TEMPLATES).join('|')}> game_template", then steps that change game.js to fit the request (rules, looks, sprites with make_sprite, 3D models with make_model), then end with "Play-test with play_test and fix everything it reports". Do not plan web searches for how to code a game; the templates are better.
-If the request says a game template is already installed, do not plan to start one: plan only the changes the request asks for (look, sprites, rules, numbers in TUNING), then the play-test. A request that only names a game ("make snake") needs no rule changes: plan a sprite or look change (a model with make_model for 3D) and the play-test.
+Games: you build them yourself. Start with "Set up the 2D or 3D engine with game_engine", then steps that make the game's parts (3D models with make_model or sprites with make_sprite), "Write game.js: <the world, player, rules and goal>", and end with "Play-test with play_test and fix everything it reports". Use game_template only when the user asks to start from a template or starter. Do not plan web searches for how to code a game.
 ${apps ? `Connected apps the agent can use through their tools: ${apps}. When the request is about one of them (a Blender scene, a Figma design), plan steps that use that app.\n` : ''}${effort.work}`;
 }
 
@@ -53,14 +51,15 @@ function systemPrompt({ plan, mode, tools, effort, files, apps }) {
     `- ${effort.work}`,
     '',
     'Games, 3D and web pages:',
-    `- New game? Call game_template first (${Object.keys(TEMPLATES).join(', ')}). It writes a working game; then edit game.js with file_edit to fit the request. Do not write a game loop from scratch and do not copy games from the web.`,
-    '- Need a feature the template lacks (lives, power-ups, coins, enemies that chase, shooting, moving platforms, levels, a timer)? game_recipe gives tested code for both 2D and 3D games; paste it in with file_edit.',
-    '- 3D games (templates starting with 3d) run on kit3d.js: game.js does `import { Kit, THREE } from \'./kit3d.js\'`, init(g) builds the world and sets g.player, update(g, dt) moves things. Shapes stand on their y: Kit.box(w, h, d, color, x, y, z), Kit.sphere, Kit.cylinder, Kit.cone, Kit.gem; Kit.model(\'assets/x.glb\', fallbackShape) for models; Kit.moveInput(), Kit.move(obj, dt) for walking with gravity and walls (Kit.solid(obj)), Kit.near(a, b, dist) and Kit.hit(a, b) for touching, Kit.hud(text) for info. Never rewrite kit3d.js.',
-    '- 3D looks: the 3D templates load assets/player.glb (and assets/enemy.glb). To change how the player or enemies look, make_model to that same path: no code change needed. Parts named leg_l, leg_r, arm_l, arm_r swing when the hero walks.',
+    '- New game? You make it yourself. Call game_engine ("2d" or "3d") to copy index.html and the engine, make the models or sprites the game needs, then write game.js with file_write: the world, the player, the rules, the goal. After that, change game.js with small file_edit calls. Do not copy games from the web.',
+    `- Use game_template (${Object.keys(TEMPLATES).join(', ')}) only when the user asks to start from a template or starter game.`,
+    '- Need a common feature (lives, power-ups, coins, enemies that chase, shooting, moving platforms, levels, a timer)? game_recipe gives tested code for both 2D and 3D games; paste it in with file_edit.',
+    '- 3D games run on kit3d.js: game.js does `import { Kit, THREE } from \'./kit3d.js\'`, init(g) builds the world and sets g.player, update(g, dt) moves things. Shapes stand on their y: Kit.box(w, h, d, color, x, y, z), Kit.sphere, Kit.cylinder, Kit.cone, Kit.gem; Kit.model(\'assets/x.glb\', fallbackShape) for models; Kit.moveInput(), Kit.move(obj, dt) for walking with gravity and walls (Kit.solid(obj)), Kit.near(a, b, dist) and Kit.hit(a, b) for touching, Kit.hud(text) for info. Never rewrite kit3d.js.',
+    '- 3D looks: make the player, enemies and props with make_model (for example assets/player.glb) and load them with Kit.model. Parts named leg_l, leg_r, arm_l, arm_r swing when Kit.walk moves the hero.',
     '- Build them as files in the workspace: index.html plus .js/.css files and an assets/ folder. Use relative paths ("./assets/tree.glb") so they run anywhere.',
-    '- 2D art: draw sprites with make_sprite (pixel art saved as PNG) and load them with Kit.image. The flyer, runner and shooter templates already draw the player from assets/player.png, so make_sprite to that path changes its look with no code change. Sound effects: Kit.sfx("jump" | "coin" | "hit" | "boom" | "power").',
+    '- 2D art: draw sprites with make_sprite (pixel art saved as PNG) and load them with Kit.image. Sound effects: Kit.sfx("jump" | "coin" | "hit" | "boom" | "power").',
     '- Bugs small models often write: an obstacle pair checked with || so the player dies at once; score added every frame instead of once per obstacle; a second game loop started on restart; listeners added inside functions that run again; drawing an object at a different place than its hitbox; a start button the inputs never reach. Check for these when a game misbehaves.',
-    '- 3D outside the templates: three.js from a CDN with an import map: {"imports": {"three": "https://unpkg.com/three@0.180.0/build/three.module.js", "three/addons/": "https://unpkg.com/three@0.180.0/examples/jsm/"}}. Load models with GLTFLoader (and OBJLoader/FBXLoader for those formats). For 2D, a plain <canvas> is enough.',
+    '- 3D without the kit: three.js from a CDN with an import map: {"imports": {"three": "https://unpkg.com/three@0.180.0/build/three.module.js", "three/addons/": "https://unpkg.com/three@0.180.0/examples/jsm/"}}. Load models with GLTFLoader (and OBJLoader/FBXLoader for those formats). For 2D, a plain <canvas> is enough.',
     '- Need a model nobody gave you? Make it with make_model (low-poly shapes, saved as .glb). Models the user attached are in assets/; run model_info on them first to learn their size and animation names.',
     '- Test like a player: after writing or changing a game, run play_test (with inputs such as "click Start", "key Space", "tap Space 8 350", "key ArrowRight 800") and read "What happened", the game state and WATCH OUT, not just Errors. Fix what it reports, then test again. Do not finish while play_test still shows errors or warnings.',
     '- Only say you fixed or changed something after a file_write or file_edit actually did it. Reading code and testing is not fixing.',
@@ -229,34 +228,6 @@ class Agent {
   }
 
   /**
-   * A request for a new game in a known genre starts from that genre's template right away,
-   * recorded as Freehand's own game_template call so the model sees the working code.
-   * Returns a note for the planner, or null.
-   */
-  async autoTemplate(userText) {
-    const kind = templateFor(userText);
-    if (!kind || this.history.some((h) => h.call && h.call.name === 'game_template')) return null;
-    try {
-      if (fs.readdirSync(this.workspace).some((f) => /\.html?$/i.test(f))) return null; // there is already a game or page to work on
-    } catch { return null; }
-    const call = { id: `call_${++this.callCounter}`, name: 'game_template', args: { template: kind, title: gameTitle(userText) } };
-    const tool = this.toolByName.game_template;
-    this.emit('tool', { id: call.id, name: call.name, label: tool.label(call.args), icon: tool.icon, args: call.args });
-    let output;
-    try {
-      output = await tool.run(call.args, this.context());
-    } catch (e) {
-      this.emit('tool_result', { id: call.id, ok: false, preview: `ERROR: ${e.message}` });
-      return null;
-    }
-    this.emit('tool_result', { id: call.id, ok: true, preview: truncate(output, TOOL_RESULT_FOR_UI) });
-    this.history.push({ role: 'assistant', content: `This is a ${kind} game, so I start from the tested ${kind} template.`, call });
-    this.history.push({ role: 'tool', id: call.id, name: call.name, content: truncate(output, TOOL_RESULT_FOR_MODEL) });
-    this.game.changed = true;
-    return `The ${kind} game template is already installed and works. Plan only the changes this request needs, then play-test.`;
-  }
-
-  /**
    * Small models "fix" a working kit game by rewriting it from scratch, which breaks it.
    * Returns an error for a file_write that would throw the kit away, or null.
    */
@@ -275,7 +246,11 @@ class Agent {
     const text = String((call.args && call.args.content) || '');
     if (file === engine) return `${engine} is the tested engine; do not rewrite it. Change game.js instead, with small file_edit calls.`;
     if (/^index\.html?$/i.test(file) && !(three ? /game\.js/.test(text) && /importmap/.test(text) : /kit\.js/.test(text))) return `This index.html no longer loads ${three ? 'game.js with the three.js import map' : 'kit.js and game.js'}, so it would throw away the working game. Keep index.html as it is and change game.js with file_edit.`;
-    if (file === 'game.js' && !/Kit\.start\s*\(/.test(text)) return 'This game.js does not call Kit.start, so the game would not run. Change the existing game.js with small file_edit calls instead of rewriting it (file_read it first if you need the exact text).';
+    if (file === 'game.js' && !/Kit\.start\s*\(/.test(text)) {
+      return fs.existsSync(path.join(this.workspace, 'game.js'))
+        ? 'This game.js does not call Kit.start, so the game would not run. Change the existing game.js with small file_edit calls instead of rewriting it (file_read it first if you need the exact text).'
+        : `This game.js does not call Kit.start, so the game would not run. End it with Kit.start({ ${three ? "title: document.title, hint: '...', camera: 'third', init, update" : 'width, height, init, update, draw'} }).`;
+    }
     return null;
   }
 
@@ -366,8 +341,7 @@ class Agent {
     this.emit('status', { status: 'running' });
     try {
       await this.addConnectorTools();
-      const started = await this.autoTemplate(userText);
-      const planned = await this.planTask(started ? `${userText}\n\n(${started})` : userText);
+      const planned = await this.planTask(userText);
       if (planned.title) this.emit('title', { title: String(planned.title).slice(0, 80) });
       if (typeof planned.answer === 'string' && !Array.isArray(planned.steps)) {
         this.history.push({ role: 'assistant', content: planned.answer });
@@ -505,14 +479,14 @@ class Agent {
     const at = output.match(/\.\/([\w./-]+\.m?js):(\d+)/);
     return `\n\nSTUCK: this same error has come back after your last ${this.sameError} fixes, so they did not touch the real cause. ` +
       (at ? `file_read ${at[1]} and look closely at line ${at[2]} and the lines that declare what it uses (a line starting with // does not run). ` : 'file_read the file the error names and look at the line it gives. ') +
-      'Then make one different fix. If it still fails, call game_template with overwrite true to get a working game back.';
+      'Then make one different fix.';
   }
 
   /** Notes game edits and play-test results, so the agent cannot finish with an untested or broken game. */
   trackGame(call, ok, output) {
     const p = String((call.args && call.args.path) || '');
     if (['file_write', 'file_edit'].includes(call.name) && ok && /\.(html?|m?js|css)$/i.test(p)) this.game.changed = true;
-    if (['game_template', 'make_sprite'].includes(call.name) && ok) this.game.changed = true;
+    if (['game_engine', 'game_template', 'make_sprite'].includes(call.name) && ok) this.game.changed = true;
     if (call.name === 'play_test' && ok) { this.game.changed = false; this.game.errors = /^(ERRORS|FILES THAT FAILED|WATCH OUT)/m.test(output); }
   }
 
@@ -524,7 +498,7 @@ class Agent {
     if (this.stepWrites > 0 || this.claimNudges >= 3) return null;
     if (!/\b(fix(ed|es)?|implement(ed|s)?|add(ed|s)?|creat(ed|es)|wrote|writ(ten|es)|updat(ed|es)|improv(ed|es)|chang(ed|es)|refactor(ed)?|replac(ed|es)|built|made|correct(ed)?|adjust(ed)?|tun(ed|es)|optimi[sz](ed|es)?)\b/i.test(summary)) return null;
     this.claimNudges++;
-    return 'Not marked done: your summary says you changed something, but no file was written or edited during this step. Make the change now with file_edit or file_write (or game_template, make_sprite, make_model), then call step_done. If this step really needed no change, call step_done again and say what you checked instead.';
+    return 'Not marked done: your summary says you changed something, but no file was written or edited during this step. Make the change now with file_edit or file_write (or game_engine, make_sprite, make_model), then call step_done. If this step really needed no change, call step_done again and say what you checked instead.';
   }
 
   uncheckedGame() {

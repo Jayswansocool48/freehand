@@ -6,7 +6,7 @@ const { webSearch, fetchPage } = require('./web');
 const { runCommand, runPython } = require('./exec');
 const { buildGlb, modelInfo, SHAPES } = require('./model3d');
 const { previewUrl } = require('../server/preview');
-const { TEMPLATES, RECIPES, RECIPES_3D, installTemplate, makeSprite } = require('./gamekit');
+const { TEMPLATES, RECIPES, RECIPES_3D, installTemplate, installEngine, makeSprite } = require('./gamekit');
 const { recipeText } = require('./gamekit/recipes');
 
 /**
@@ -226,12 +226,34 @@ function buildTools() {
       },
     },
     {
+      name: 'game_engine',
+      icon: 'game-controller',
+      description:
+        'Set up a new game you will write yourself: copies index.html and the game engine (kit.js for 2D, kit3d.js for 3D). ' +
+        'The engine handles the loop, input, camera, physics, sounds and the title and game-over screens; there is no game yet. ' +
+        'Then write game.js yourself with file_write: the world, the player, the rules, the goal.',
+      parameters: obj({ kind: { type: 'string', enum: ['2d', '3d'] }, title: str('game title shown on the title screen') }, ['kind']),
+      label: (a) => `Setting up the ${a.kind === '3d' ? '3D' : '2D'} game engine`,
+      async run(a, ctx) {
+        const kind = a.kind === '3d' ? '3d' : '2d';
+        const files = installEngine(ctx.workspace, kind, { title: a.title });
+        for (const f of files) ctx.emit('file', { path: f });
+        const engine = kind === '3d' ? 'kit3d.js' : 'kit.js';
+        const docs = fs.readFileSync(path.join(ctx.workspace, engine), 'utf8').match(/^\/\*[\s\S]*?\*\//);
+        return `Wrote ${files.join(', ')}. Now write game.js yourself with file_write (it does not exist yet). Do not edit ${engine} or index.html.\n\n` +
+          (kind === '3d'
+            ? 'game.js shape: `import { Kit, THREE } from \'./kit3d.js\';` then function init(g) { build the ground, objects and g.player (with g.player.vel = new THREE.Vector3()) }, function update(g, dt) { move things, check touches, Kit.addScore, Kit.gameOver }, and last Kit.start({ title: document.title, hint: \'how to play\', camera: \'third\', init, update }).'
+            : 'game.js shape: function init(g) { reset the round }, function update(g, dt) { move things, Kit.addScore, Kit.gameOver }, function draw(g, ctx) { draw }, and last Kit.start({ width: 480, height: 640, init, update, draw }).') +
+          ' Make models with make_model (3D) or sprites with make_sprite (2D); game_recipe has tested code for common features.' +
+          `\n\n${engine} API:\n${docs ? docs[0] : ''}`;
+      },
+    },
+    {
       name: 'game_template',
       icon: 'game-controller',
       description:
-        'Start a game from a tested starter that already works (title screen, game loop, controls, collisions, score, game over, restart, sounds, high score). ' +
-        `Templates: ${Object.entries(TEMPLATES).map(([k, t]) => `"${k}" (${t.about})`).join('; ')}. ` +
-        'Use it first for any new game, then change game.js to match the request: rules, numbers in TUNING, looks, sprites or models. Much safer than writing a game from scratch.',
+        'Copy a finished starter game. Only use it when the user asks to start from a template or starter; otherwise write the game yourself with game_engine. ' +
+        `Templates: ${Object.entries(TEMPLATES).map(([k, t]) => `"${k}" (${t.about})`).join('; ')}.`,
       parameters: obj({ template: { type: 'string', enum: Object.keys(TEMPLATES) }, title: str('game title shown on the title screen'), overwrite: { type: 'boolean', description: 'replace existing index.html/game files' } }, ['template']),
       label: (a) => `Starting from the ${a.template} game template`,
       async run(a, ctx) {
@@ -251,7 +273,7 @@ function buildTools() {
       name: 'game_recipe',
       icon: 'book-open',
       description:
-        'Tested code to add a feature to a game made from a template, in parts (top of game.js, init, update, and draw for 2D) to paste in with file_edit. ' +
+        'Tested code to add a feature to a kit.js or kit3d.js game, in parts (top of game.js, init, update, and draw for 2D) to paste in with file_edit. ' +
         'It picks the 2D or 3D version for the game in the workspace. ' +
         `2D recipes: ${Object.entries(RECIPES).map(([k, r]) => `"${k}" (${r.about})`).join('; ')}. ` +
         `3D recipes: ${Object.entries(RECIPES_3D).map(([k, r]) => `"${k}" (${r.about})`).join('; ')}.`,

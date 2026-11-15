@@ -328,57 +328,34 @@ test('make_sprite saves a PNG, makes sprite sheets and reports colours missing f
   await assert.rejects(tool('make_sprite').run({ path: 'x.png', pixels: ['A'], palette: { A: 'blurple' } }, ctx), /not a hex color/);
 });
 
-test('genres: a request for a new game picks a template and a title', () => {
-  const { templateFor, gameTitle } = require('../src/core/genres');
-  const cases = {
-    'make flappy bird': 'flyer',
-    'make a snake game': 'snake',
-    'build a breakout game with colourful bricks': 'breakout',
-    'make a space shooter': 'shooter',
-    'make me an endless runner game': 'runner',
-    'make a platformer where a fox collects gems': 'platformer',
-    'make a 3d racing game': '3d-racer',
-    'make a racing game with a red car': '3d-racer',
-    'make a first person shooter with zombies': '3d-fps',
-    'make a 3d platformer with a robot': '3d-platformer',
-    'make a 3d endless runner': '3d-runner',
-    'make a 3d plane game': '3d-flyer',
-    'make a 3d game where a knight collects coins': '3d',
-    'make a game where you dodge falling rocks': 'topdown',
-    'what is the capital of france': null,
-    'fix the game so the bird flies higher': null,
-    'write a python script that renames photos': null,
-  };
-  for (const [ask, kind] of Object.entries(cases)) assert.equal(templateFor(ask), kind, ask);
-  assert.equal(gameTitle('make flappy bird'), 'Flappy Bird');
-  assert.equal(gameTitle('build an endless runner game'), 'Endless Runner');
-  assert.equal(gameTitle('make a platformer where a fox collects gems'), 'Platformer');
-  assert.equal(gameTitle('make a 3d game where a knight collects gold coins'), 'Knight Collects Gold Coins');
-  assert.equal(gameTitle('make a fps game'), 'FPS');
+test('game_engine copies only the engine, so the model writes the game itself', async () => {
+  const ws = fs.mkdtempSync(path.join(home, 'ws-'));
+  const out = await tool('game_engine').run({ kind: '3d', title: 'Knight <Run>' }, ctxFor(ws).ctx);
+  assert.deepEqual(fs.readdirSync(ws).sort(), ['index.html', 'kit3d.js']);
+  assert.match(fs.readFileSync(path.join(ws, 'index.html'), 'utf8'), /<title>Knight Run<\/title>[\s\S]*importmap/);
+  assert.match(out, /write game\.js yourself/);
+  assert.match(out, /Kit\.start\(\{ init, update, title, hint, camera/, 'the model gets the engine API');
+  const ws2 = fs.mkdtempSync(path.join(home, 'ws-'));
+  await tool('game_engine').run({ kind: '2d' }, ctxFor(ws2).ctx);
+  assert.deepEqual(fs.readdirSync(ws2).sort(), ['index.html', 'kit.js']);
 });
 
-test('agent starts a known kind of game from its template before the model acts', async () => {
+test('agent does not install a starter game for a game request', async () => {
   let firstAgentCall = null;
   const mock = await mockProvider((body) => {
-    if (!body.tools) return { message: text('{"title":"Flappy","steps":["Play-test it"]}') };
+    if (!body.tools) return { message: text('{"title":"Flappy","steps":["Write the game"]}') };
     if (!firstAgentCall) firstAgentCall = body.messages;
-    const n = body.messages.filter((m) => m.role === 'tool').length;
-    if (n === 1) return { message: toolCall('play_test', { path: 'index.html' }) };
     return { message: toolCall('finish', { message: 'Done' }) };
   });
   const s = settingsFor(mock.url, { effort: 'low' });
   const workspace = fs.mkdtempSync(path.join(home, 'ws-'));
   const events = [];
   const agent = new Agent({ settings: s, workspace, signal: new AbortController().signal, history: [], emit: (t, d) => events.push({ type: t, ...d }), ask: async () => '', approve: async () => true });
-  agent.toolByName.play_test.run = async () => 'Errors: none';
-  await agent.run('make flappy bird');
+  await agent.run('make a 3d flappy bird game');
   mock.close();
-  assert.match(fs.readFileSync(path.join(workspace, 'index.html'), 'utf8'), /<title>Flappy Bird<\/title>/);
-  assert.ok(fs.existsSync(path.join(workspace, 'kit.js')));
-  assert.equal(events.find((e) => e.type === 'tool').name, 'game_template', 'the UI shows the template step first');
-  const call = firstAgentCall.find((m) => m.role === 'assistant' && m.tool_calls);
-  assert.equal(call.tool_calls[0].function.name, 'game_template', 'the model sees the template as its own earlier call');
-  assert.ok(firstAgentCall.some((m) => m.role === 'tool' && /TUNING/.test(m.content)), 'and it sees the game code');
+  assert.deepEqual(fs.readdirSync(workspace), [], 'no files appear before the model writes them');
+  assert.ok(!events.some((e) => e.type === 'tool' && e.name === 'game_template'));
+  assert.ok(!firstAgentCall.some((m) => m.role === 'assistant' && m.tool_calls), 'the model starts with no tool calls made for it');
 });
 
 test('agent refuses a file_write that would throw away a working kit game', async () => {
@@ -404,6 +381,11 @@ test('agent refuses a file_write that would throw away a working kit game', asyn
   assert.match(agent3.guardWrite({ name: 'web_search', args: { query: 'free gold coin glb model download' } }), /make_model/);
   assert.equal(agent3.guardWrite({ name: 'web_search', args: { query: 'how fast does a cheetah run' } }), null);
   assert.equal(agent.guardWrite({ name: 'web_fetch', args: { url: 'https://example.com/a.png' } }) === null, false);
+
+  const ws4 = fs.mkdtempSync(path.join(home, 'ws-'));
+  require('../src/tools/gamekit').installEngine(ws4, '3d');
+  const agent4 = new Agent({ settings: settingsFor('http://127.0.0.1:1'), workspace: ws4, signal: new AbortController().signal, history: [], emit: () => {}, ask: async () => '', approve: async () => true });
+  assert.match(agent4.guardWrite({ name: 'file_write', args: { path: 'game.js', content: 'let x;' } }), /End it with Kit\.start\(\{ title/, 'a first game.js gets told how to end, not to edit');
 });
 
 test('every game recipe runs inside a kit game without errors', () => {
