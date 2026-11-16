@@ -280,4 +280,4 @@ function makeSprite({ pixels, palette = {}, scale = 1, frames }) {
 
 const { RECIPES, RECIPES_3D } = require('./recipes');
 
-module.exports = { TEMPLATES, RECIPES, RECIPES_3D, MODELS_3D, installTemplate, installEngine, makeSprite, encodePng };
+module.exports = { TEMPLATES, RECIPES, RECIPES_3D, MODELS_3D, PLAYER_SPRITES, installTemplate, installEngine, makeSprite, encodePng };

@@ -1,0 +1,30 @@
+# freehand-v3 on a free Colab T4 (16 GB): the full runs, with Freehand's tool list, up to 14.4k tokens.
+# Used by training/freehand_v3_colab.ipynb. (training/soup.yaml is the 4 GB laptop version.)
+base: Qwen/Qwen3-4B-Instruct-2507
+task: sft
+
+data:
+  train: ./freehand.jsonl
+  format: tool-calling
+  val_split: 0.1
+  max_length: 16384
+  # Learn only the model's own replies, not the system prompt, tool list or tool results.
+  train_on_responses_only: false
+  train_on_messages_with_train_field: true
+
+training:
+  epochs: 2
+  lr: 1e-4
+  batch_size: 1
+  gradient_accumulation_steps: 8
+  gradient_checkpointing: true
+  lora:
+    r: 16
+    alpha: 32
+    target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  quantization: 4bit
+  stream_layers: true          # keeps a 14k-token step inside the T4's memory
+  stream_loss_chunk: 128       # the 151k-word output layer, 128 tokens at a time
+  stream_vram_probe: true
+
+output: ./output

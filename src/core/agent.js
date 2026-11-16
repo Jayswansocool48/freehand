@@ -12,6 +12,7 @@ const { designBrief, missingFeatures } = require('./gamedesign');
 const plugins = require('./plugins');
 
 const TOOL_RESULT_FOR_MODEL = 6000;
+const STUCK_LIMIT = 8; // play_test reporting the same error after this many fixes stops the task
 const TOOL_RESULT_FOR_UI = 3500;
 const WRITES = ['file_write', 'file_edit', 'game_engine', 'game_template', 'make_sprite', 'make_model'];
 
@@ -170,6 +171,7 @@ class Agent {
     this.game = { changed: false, errors: false, nudges: 0 }; // tracks whether the game was play-tested since it last changed
     this.stepWrites = 0; // files changed during the current plan step
     this.sources = new Map(); // url -> { url, title, read }: pages found or read, shown under the answer like Claude does
+    this.fileStates = new Set(); // versions of files seen, so undoing and redoing an edit is not progress
     this.writes = 0; // files changed during the whole task, to tell progress from going round in circles
     this.claimNudges = 0;
     this.failStreak = 0;
@@ -585,6 +587,8 @@ class Agent {
           this.history.push({ role: 'assistant', content: d.text }, { role: 'user', content: unchecked || `You replied with text, but the plan is not finished (current step: "${open.text}"). Do the work by calling a tool. Call step_done when a step is complete, and finish only at the end.` });
           continue;
         }
+        // Never call unfinished work done: a model that keeps answering in text (or in junk) has not built anything.
+        if (open) return this.stopEarly(`I stopped because the model kept replying with text instead of doing the work, so the plan is not finished (stuck at: "${open.text}"). What exists so far is in the workspace. Try again, or pick another model in Settings.`);
         return this.finish(d.text, []);
       }
 
@@ -649,9 +653,13 @@ class Agent {
       }
       this.emit('tool_result', { id: call.id, ok, preview: truncate(output, TOOL_RESULT_FOR_UI) });
       if (ok && call.name === 'play_test') output += this.repeatedError(output);
+      if (this.sameError >= STUCK_LIMIT) {
+        this.history.push({ role: 'tool', id: call.id, name: call.name, content: truncate(output, TOOL_RESULT_FOR_MODEL) });
+        return this.stopEarly(`I stopped because play_test kept reporting the same error after ${this.sameError} fixes: ${this.lastError}. My fixes were not reaching the cause, so going on would only repeat them. What I made so far is in the workspace. Tell me what to try, or ask me to rewrite game.js from scratch.`);
+      }
       if (ok) this.noteSources(call, output);
       this.trackGame(call, ok, output);
-      if (ok && WRITES.includes(call.name)) { this.stepWrites++; this.writes++; }
+      if (ok && WRITES.includes(call.name) && this.isNewState(call)) { this.stepWrites++; this.writes++; }
       if (ok && ['file_write', 'file_edit'].includes(call.name)) this.lastCalls = []; // the files changed, so repeating a test or run is new work
       this.failStreak = ok ? 0 : this.failStreak + 1;
       if (this.failStreak === 3) {
@@ -659,10 +667,29 @@ class Agent {
       }
       this.history.push({ role: 'tool', id: call.id, name: call.name, content: truncate(output, TOOL_RESULT_FOR_MODEL) });
     }
-    const msg = `I stopped because the last ${max} steps changed nothing: no file was written and no plan step was finished, so I was going round in circles. What I made so far is in the workspace. Tell me what to change or try, and I will pick it up from there.`;
+    return this.stopEarly(`I stopped because the last ${max} steps changed nothing: no file was written and no plan step was finished, so I was going round in circles. What I made so far is in the workspace. Tell me what to change or try, and I will pick it up from there.`);
+  }
+
+  /** Ends the task as stopped (not done), saying why; the plan keeps its real state. */
+  stopEarly(msg) {
+    this.history.push({ role: 'assistant', content: msg });
     this.emit('final', { message: msg, files: [] });
     this.emit('status', { status: 'stopped' });
     return { status: 'stopped', message: msg };
+  }
+
+  /**
+   * False when a file edit only brought a file back to a version it had before. A model going round in
+   * circles flips the same lines back and forth, and that must not count as progress.
+   */
+  isNewState(call) {
+    if (!['file_write', 'file_edit'].includes(call.name)) return true;
+    let text;
+    try { text = fs.readFileSync(path.join(this.workspace, String(call.args.path || '')), 'utf8'); } catch { return true; }
+    const key = `${call.args.path}\0${require('crypto').createHash('sha1').update(text).digest('hex')}`;
+    if (this.fileStates.has(key)) return false;
+    this.fileStates.add(key);
+    return true;
   }
 
   /** A count that grows whenever the task gets somewhere: a file written or a plan step finished. */
@@ -683,7 +710,8 @@ class Agent {
     const at = output.match(/\.\/([\w./-]+\.m?js):(\d+)/);
     return `\n\nSTUCK: this same error has come back after your last ${this.sameError} fixes, so they did not touch the real cause. ` +
       (at ? `file_read ${at[1]} and look closely at line ${at[2]} and the lines that declare what it uses (a line starting with // does not run). ` : 'file_read the file the error names and look at the line it gives. ') +
-      'Then make one different fix.';
+      (this.sameError >= 4 ? 'Small edits are not working: file_read the whole file and file_write a corrected version of it. ' : 'Then make one different fix. ') +
+      `If it is still there after ${STUCK_LIMIT} fixes, Freehand stops the task.`;
   }
 
   /** Notes game edits and play-test results, so the agent cannot finish with an untested or broken game. */

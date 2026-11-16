@@ -4,3 +4,9 @@ dist/
 .DS_Store
 vendor/
 eval-results/
+# Model training: only the scripts, configs and data are kept in git
+training/output/
+training/merged/
+training/*.gguf
+training/freehand-windows.jsonl
+training/.soup_merge_tmp_output/

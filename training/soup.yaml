@@ -1,0 +1,33 @@
+# Trains freehand-v3 on Freehand's own runs (made by scripts/make-training-data.js,
+# then split with: python -I training/window.py training/freehand.jsonl training/freehand-windows.jsonl 5000).
+#   soup train --config training/soup.yaml        (run from the repo root)
+# Layer streaming keeps the frozen base in RAM so it trains on a 4 GB laptop GPU.
+base: Qwen/Qwen3-4B-Instruct-2507
+task: sft
+
+data:
+  train: ./training/freehand-windows.jsonl   # freehand.jsonl split by training/window.py to fit a 4 GB card
+  format: tool-calling
+  val_split: 0.1
+  max_length: 5120
+  # Learn only the model's own replies, not the system prompt or tool results.
+  train_on_responses_only: false
+  train_on_messages_with_train_field: true
+
+training:
+  epochs: 2
+  lr: 1e-4
+  batch_size: 1
+  gradient_accumulation_steps: 8
+  gradient_checkpointing: true
+  lora:
+    r: 16
+    alpha: 32
+    target_modules: auto
+  quantization: 4bit
+  stream_layers: true
+  stream_loss_chunk: 128
+  stream_vram_probe: true      # measure one real step instead of the formula estimate
+  activation_offloading: cpu   # activations go to RAM, which leaves room on the 4 GB card
+
+output: ./training/output

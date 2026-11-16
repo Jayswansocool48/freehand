@@ -435,6 +435,14 @@ test('agent says it is stuck when play_test keeps reporting the same error', () 
   assert.equal(agent.repeatedError(report), '');
   assert.match(agent.repeatedError(report), /STUCK[\s\S]*file_read game\.js[\s\S]*line 20/);
   assert.equal(agent.repeatedError('Played ./index.html\nErrors: none'), '');
+
+  // Undoing and redoing the same edit is not progress.
+  fs.writeFileSync(path.join(home, 'loop.js'), 'a');
+  assert.equal(agent.isNewState({ name: 'file_edit', args: { path: 'loop.js' } }), true);
+  fs.writeFileSync(path.join(home, 'loop.js'), 'b');
+  assert.equal(agent.isNewState({ name: 'file_edit', args: { path: 'loop.js' } }), true);
+  fs.writeFileSync(path.join(home, 'loop.js'), 'a');
+  assert.equal(agent.isNewState({ name: 'file_edit', args: { path: 'loop.js' } }), false);
 });
 
 test('file_edit refuses an edit that only adds lines the file already has', async () => {
