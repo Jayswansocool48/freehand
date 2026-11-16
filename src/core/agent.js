@@ -220,9 +220,16 @@ class Agent {
    */
   render(mode, limit) {
     const budget = Math.min(Math.round(this.settings.contextChars * this.effort.context), limit || Infinity);
-    const cap = Math.max(800, Math.floor(budget * 0.4));
+    // The newest tool result may use more of the room than older ones. A cut is always marked: a model
+    // shown half a file without a note thinks the file itself ends there and "finishes" it.
+    const last = this.history.length - 1;
+    const fit = (h, i) => {
+      const max = Math.max(800, Math.floor(budget * (i === last && h.role === 'tool' ? 0.6 : 0.4)));
+      if (!h.content || h.content.length <= max) return h.content;
+      return `${h.content.slice(0, max)}\n...[Freehand cut this here to fit the model's memory; ${h.content.length - max} more characters are not shown.${h.role === 'tool' && h.name === 'file_read' ? ` The file itself is complete: file_read with offset=${max} shows the rest.` : ''}]`;
+    };
     let used = 0;
-    let items = this.history.map((h) => ({ ...h, content: h.content && h.content.length > cap ? truncate(h.content, cap, false) : h.content }));
+    let items = this.history.map((h, i) => ({ ...h, content: fit(h, i) }));
     let cut = 0; // items before this index (except the first) are dropped
     for (let i = items.length - 1; i >= 0; i--) {
       used += (items[i].content || '').length + JSON.stringify((items[i].call && items[i].call.args) || '').length + 40;
@@ -293,11 +300,13 @@ class Agent {
         return 'Models and art for this game are made here, not downloaded (download sites need a login and the files never arrive). Make a 3D model with make_model, or a sprite with make_sprite, saved in assets/. To restyle the player or enemies, make_model to assets/player.glb or assets/enemy.glb.';
       }
     }
-    if (call.name !== 'file_write') return null;
+    if (call.name !== 'file_write' && call.name !== 'file_edit') return null;
     const three = fs.existsSync(path.join(this.workspace, 'kit3d.js'));
     if (!three && !fs.existsSync(path.join(this.workspace, 'kit.js'))) return null;
     const engine = three ? 'kit3d.js' : 'kit.js';
     const file = String((call.args && call.args.path) || '').replace(/^\.\//, '');
+    // Small models "fix" their own game.js bugs inside the engine and break it.
+    if (call.name === 'file_edit') return file === engine ? `${engine} is the tested engine, so the bug is not in it; do not edit it. Fix game.js instead. If the game does not start, check that game.js ends with Kit.start({ ... }) and has no syntax errors.` : null;
     const text = String((call.args && call.args.content) || '');
     if (file === engine) return `${engine} is the tested engine; do not rewrite it. Change game.js instead, with small file_edit calls.`;
     if (/^index\.html?$/i.test(file) && !(three ? /game\.js/.test(text) && /importmap/.test(text) : /kit\.js/.test(text))) return `This index.html no longer loads ${three ? 'game.js with the three.js import map' : 'kit.js and game.js'}, so it would throw away the working game. Keep index.html as it is and change game.js with file_edit.`;

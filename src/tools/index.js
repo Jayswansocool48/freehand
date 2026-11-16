@@ -175,6 +175,11 @@ function buildTools() {
         if (!fs.existsSync(p)) throw new Error(`No such file: ${a.path}`);
         const txt = fs.readFileSync(p, 'utf8');
         const m = locateEdit(txt, String(a.find), String(a.replace == null ? '' : a.replace));
+        // A "find" that stops inside a word means the model thinks the file ends there and is "finishing" it.
+        if (/\w/.test(txt[m.end - 1] || '') && /\w/.test(txt[m.end] || '')) {
+          const rest = txt.slice(m.end).split('\n')[0];
+          throw new Error(`Not changed: "find" stops in the middle of a word (the file goes on with "${truncate(rest, 60, false)}"). The file is not cut off. Copy whole lines into "find".`);
+        }
         // Small models "fix" a bug by adding a line the file already has, again and again
         const found = new Set(txt.slice(m.start, m.end).split('\n').map((l) => l.trim()));
         const added = m.replace.split('\n').map((l) => l.trim()).filter((l) => l.length > 3 && !found.has(l) && !/^[{}()[\];,]*$/.test(l));

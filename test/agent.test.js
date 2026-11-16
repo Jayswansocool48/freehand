@@ -431,3 +431,11 @@ test('context: a long history is fitted to the model, and a too-big request is t
     assert.ok(Math.max(...sizes.slice(1)) < 16384 * 3, `largest history ${Math.max(...sizes)} chars`);
   } finally { prov.close(); }
 });
+
+test('context: a cut tool result says it was cut, so the model does not think the file ends there', () => {
+  const s = defaultSettings();
+  const agent = new Agent({ settings: s, workspace: home, signal: new AbortController().signal, emit: () => {}, ask: async () => '', approve: async () => true,
+    history: [{ role: 'user', content: 'fix it' }, { role: 'assistant', content: '', call: { id: 'r', name: 'file_read', args: { path: 'game.js' } } }, { role: 'tool', id: 'r', name: 'file_read', content: 'x'.repeat(20000) }] });
+  const out = agent.render('native', 10000);
+  assert.match(out[out.length - 1].content, /cut this here[\s\S]*file itself is complete[\s\S]*offset=6000/);
+});

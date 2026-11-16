@@ -26,31 +26,31 @@ const FEATURES = {
 
 // Well-known games: what playing them is like, in features Freehand can build.
 const KNOWN = [
-  { re: /\brust\b|\bdayz\b|\bark\b|\bvalheim\b|\bthe forest\b|\bsurviv(al|e)\b/i, name: 'a survival game like Rust', camera: 'third',
+  { re: /\brust\b|\bdayz\b|\bark\b|\bvalheim\b|\bthe forest\b|\bsurviv(al|e)\b/i, name: 'a survival game like Rust', d3: true, camera: 'third',
     loop: 'start with nothing, gather wood and stone, craft better tools, build a shelter, eat to stay alive, and survive enemies at night',
     features: ['gather', 'craft', 'build', 'hunger', 'daynight', 'enemies'] },
-  { re: /\bminecraft\b|\bvoxel\b|\bblock ?craft\b/i, name: 'a block-building game like Minecraft', camera: 'third',
+  { re: /\bminecraft\b|\bvoxel\b|\bblock ?craft\b/i, name: 'a block-building game like Minecraft', d3: true, camera: 'third',
     loop: 'mine trees and rocks for blocks, craft tools, place blocks to build, and survive monsters that come out at night',
     features: ['gather', 'craft', 'build', 'daynight', 'enemies', 'hunger'] },
-  { re: /\bfortnite\b|\bpubg\b|\bbattle ?royale\b|\bapex\b|\bwarzone\b/i, name: 'a battle royale', camera: 'third',
+  { re: /\bfortnite\b|\bpubg\b|\bbattle ?royale\b|\bapex\b|\bwarzone\b/i, name: 'a battle royale', d3: true, camera: 'third',
     loop: 'drop into a map, find cover, shoot the other players (enemies), and build walls for cover; be the last one standing',
     features: ['shooting', 'enemies', 'build', 'gather', 'lives', 'scenery'] },
-  { re: /\bdoom\b|\bcall of duty\b|\bcod\b|\bhalo\b|\bcounter[ -]?strike\b|\bfps\b|first[ -]person shooter/i, name: 'a first-person shooter', camera: 'first',
+  { re: /\bdoom\b|\bcall of duty\b|\bcod\b|\bhalo\b|\bcounter[ -]?strike\b|\bfps\b|first[ -]person shooter/i, name: 'a first-person shooter', d3: true, camera: 'first',
     loop: 'move through an arena, shoot waves of enemies that come for you, and stay alive as the waves get harder',
     features: ['shooting', 'enemies', 'lives', 'levels', 'scenery'] },
   { re: /\bmario\b|\bplatform(er)?\b|\bobby\b|\bparkour\b/i, name: 'a platformer', camera: 'third',
     loop: 'run and jump across platforms, some moving, collect things on the way, and reach the goal without falling',
     features: ['platforms', 'coins', 'lives'] },
-  { re: /\bzelda\b|\badventure\b|\brpg\b|\bdungeon\b/i, name: 'an action adventure', camera: 'third',
+  { re: /\bzelda\b|\badventure\b|\brpg\b|\bdungeon\b/i, name: 'an action adventure', d3: true, camera: 'third',
     loop: 'explore a world, fight enemies, collect treasure and grow stronger',
     features: ['enemies', 'shooting', 'lives', 'coins', 'scenery'] },
-  { re: /\bfnaf\b|five nights|\bhorror\b|\bbackrooms\b|\bscary\b/i, name: 'a horror game', camera: 'first',
+  { re: /\bfnaf\b|five nights|\bhorror\b|\bbackrooms\b|\bscary\b/i, name: 'a horror game', d3: true, camera: 'first',
     loop: 'survive until morning in a dark place while something hunts you; manage a limited resource and hide or run',
     features: ['enemies', 'daynight', 'timer', 'lives'] },
-  { re: /\bsubway surfers\b|\btemple run\b|endless runner/i, name: 'an endless runner', camera: 'chase',
+  { re: /\bsubway surfers\b|\btemple run\b|endless runner/i, name: 'an endless runner', d3: true, camera: 'chase',
     loop: 'run forward forever, switch lanes and jump over obstacles, collect coins, and go faster over time',
     features: ['coins', 'levels', 'lives'] },
-  { re: /\bgta\b|\bgrand theft\b|\bracing\b|\bracer\b|\bdriv(e|ing)\b|\bkart\b/i, name: 'a driving game', camera: 'chase',
+  { re: /\bgta\b|\bgrand theft\b|\bracing\b|\bracer\b|\bdriv(e|ing)\b|\bkart\b/i, name: 'a driving game', d3: true, camera: 'chase',
     loop: 'drive a car around a track or town, beat the clock and avoid crashing',
     features: ['timer', 'scenery', 'levels'] },
 ];
@@ -81,7 +81,8 @@ function designBrief(text, research = '') {
   if (!isGame(t)) return null;
   const known = KNOWN.find((k) => k.re.test(t));
   const like = likeGame(t);
-  const three = /\b3d\b|three\.?js|first[ -]person|third[ -]person/i.test(t) || (known && known.camera === 'first');
+  // Games that are 3D in real life are made 3D unless the request says 2D.
+  const three = !/\b2d\b/i.test(t) && (/\b3d\b|three\.?js|first[ -]person|third[ -]person/i.test(t) || !!(known && known.d3));
   // "Simple" keeps the features that make it that game and drops the extras.
   const simple = /\b(simple|small|basic|quick|tiny|easy)\b/i.test(t);
   const features = known ? known.features.slice(0, simple ? 4 : 8) : [];

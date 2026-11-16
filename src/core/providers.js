@@ -102,6 +102,29 @@ async function readStream(res) {
   return { choices: [{ message, finish_reason: finishReason }] };
 }
 
+/**
+ * POST without fetch's time limits, for models on this PC (plain http). Ollama sends a tool call only
+ * once it is complete, and on a slow PC that can take longer than the 5 minutes fetch waits between
+ * parts of a response, so fetch would cut the reply off and the whole step would start again.
+ */
+function postNoTimeout(url, { headers, body, signal }) {
+  return new Promise((resolve, reject) => {
+    const req = require('http').request(url, { method: 'POST', headers: { ...headers, 'content-length': Buffer.byteLength(body) }, signal }, (res) => {
+      const text = async () => { let t = ''; for await (const c of res) t += c; return t; };
+      resolve({
+        status: res.statusCode,
+        ok: res.statusCode >= 200 && res.statusCode < 300,
+        headers: { get: (k) => (res.headers[k.toLowerCase()] == null ? null : String(res.headers[k.toLowerCase()])) },
+        body: res,
+        text,
+        json: async () => JSON.parse(await text()),
+      });
+    });
+    req.on('error', reject);
+    req.end(body);
+  });
+}
+
 /** One request to one provider. Throws ProviderError. */
 async function chatOnce({ settings, providerId, messages, tools, signal }) {
   const p = settings.providers[providerId];
@@ -122,16 +145,13 @@ async function chatOnce({ settings, providerId, messages, tools, signal }) {
 
   let res;
   try {
-    res = await fetch(joinUrl(p.baseUrl, 'chat/completions'), {
-      method: 'POST',
-      headers: authHeaders(settings, providerId),
-      body: JSON.stringify(body),
-      signal,
-    });
+    const url = joinUrl(p.baseUrl, 'chat/completions');
+    const req = { method: 'POST', headers: authHeaders(settings, providerId), body: JSON.stringify(body), signal };
+    res = /^http:/i.test(url) ? await postNoTimeout(url, req) : await fetch(url, req);
   } catch (e) {
     if (signal && signal.aborted) throw e;
     const hint = providerId === 'ollama' ? ' Is Ollama running? (start it with "ollama serve")' : '';
-    throw new ProviderError(`Cannot reach ${providerId} at ${p.baseUrl}: ${(e.cause && e.cause.code) || e.message}.${hint}`, 0, { retryable: true });
+    throw new ProviderError(`Cannot reach ${providerId} at ${p.baseUrl}: ${(e.cause && e.cause.code) || e.code || e.message}.${hint}`, 0, { retryable: true });
   }
 
   if (!res.ok) {

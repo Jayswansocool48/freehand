@@ -368,7 +368,8 @@ test('agent refuses a file_write that would throw away a working kit game', asyn
   assert.match(w('game.js', 'function loop() {}'), /does not call Kit\.start/);
   assert.equal(w('game.js', 'Kit.start({ init, update, draw });'), null);
   assert.equal(w('notes.md', 'hi'), null);
-  assert.equal(agent.guardWrite({ name: 'file_edit', args: { path: 'kit.js' } }), null);
+  assert.match(agent.guardWrite({ name: 'file_edit', args: { path: 'kit.js' } }), /tested engine/);
+  assert.equal(agent.guardWrite({ name: 'file_edit', args: { path: 'game.js' } }), null);
 
   const ws3 = fs.mkdtempSync(path.join(home, 'ws-'));
   require('../src/tools/gamekit').installTemplate(ws3, '3d-fps');
@@ -442,6 +443,8 @@ test('file_edit refuses an edit that only adds lines the file already has', asyn
   const { ctx } = ctxFor(ws);
   await assert.rejects(tool('file_edit').run({ path: 'game.js', find: "const knight = Kit.model('a.glb');", replace: "const knight = Kit.model('a.glb');\ng.player = knight;" }, ctx), /already in game\.js/);
   await tool('file_edit').run({ path: 'game.js', find: 'g.player = knight;', replace: 'g.player = knight;\ng.player.vel = new THREE.Vector3();' }, ctx);
+  // A find that stops mid-word comes from a model that thinks the file was cut off there.
+  await assert.rejects(tool('file_edit').run({ path: 'game.js', find: 'g.player = kn', replace: 'g.player = null;' }, ctx), /middle of a word[\s\S]*not cut off/);
   assert.match(fs.readFileSync(path.join(ws, 'game.js'), 'utf8'), /vel = new THREE/);
 });
 
@@ -452,6 +455,8 @@ test('game design: a "rust like" request becomes a survival brief, and finishing
   assert.match(b.text, /survival game like Rust/);
   assert.equal(designBrief('make a game like Hollow Knight').like, 'Hollow Knight');
   assert.equal(designBrief('write a python script'), null);
+  assert.equal(designBrief('make a rust like game').three, true, 'Rust is a 3D game, so it is built in 3D');
+  assert.equal(designBrief('make a 2d rust like game').three, false);
   assert.equal(missingFeatures(b, 'g.coins = []; // a coin collector').length, 4, 'a coin collector is not a survival game');
   const { RECIPES_3D } = require('../src/tools/gamekit/recipes');
   const all = ['gather', 'craft', 'build', 'hunger'].map((n) => RECIPES_3D[n].top + RECIPES_3D[n].update).join('\n');
