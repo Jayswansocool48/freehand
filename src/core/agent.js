@@ -1,7 +1,7 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
-const { chat } = require('./providers');
+const { chat, contextTokens } = require('./providers');
 const { buildTools, listDir } = require('../tools');
 const { BrowserSession } = require('../tools/browser');
 const { stripThinking, extractJson, truncate, safePath } = require('./util');
@@ -36,6 +36,20 @@ Prefer the fewest steps that get a verified result. Do not include a "write the 
 Games: you build them yourself, and they must be the game that was asked for. When a game design is given, follow it: start with "Set up the 2D or 3D engine with game_engine", then steps that make the models (make_model) or sprites (make_sprite) for the important things, "Write game.js: <the world, player, and core loop>", then one step per feature in the design ("Add gathering with game_recipe gather"), and end with "Play-test with play_test and fix everything it reports". Use game_template only when the user asks to start from a template or starter. Do not plan web searches for how to code a game.
 ${apps ? `Connected apps the agent can use through their tools: ${apps}. When the request is about one of them (a Blender scene, a Figma design), plan steps that use that app.\n` : ''}${effort.work}`;
 }
+
+// Rough size of text in tokens: JSON and code run about 3 characters per token.
+const CHARS_PER_TOKEN = 3;
+const toolChars = (t) => JSON.stringify({ name: t.name, description: t.description, parameters: t.parameters }).length + 30;
+const STOP = new Set('the and for with that this from into make made want can you your use using some all are was what how about a an to of in on it is be me my i do'.split(' '));
+const wordsOf = (x) => new Set((String(x || '').toLowerCase().match(/[a-z0-9]{2,}/g) || []).filter((w) => !STOP.has(w)));
+/** How many of the request's words appear in a tool's app, name and description. */
+function matchScore(t, text) {
+  const have = wordsOf(`${t.connector} ${t.name.replace(/_/g, ' ')} ${t.description}`);
+  let n = 0;
+  for (const w of wordsOf(text)) if (have.has(w) || have.has(w.replace(/s$/, ''))) n++;
+  return n;
+}
+const rankTools = (tools, text) => tools.map((t, i) => ({ t, i, s: matchScore(t, text) })).sort((a, b) => b.s - a.s || a.i - b.i).map((x) => x.t);
 
 function systemPrompt({ plan, mode, tools, effort, files, apps, brief, skills, memory }) {
   const lines = [
@@ -161,6 +175,8 @@ class Agent {
     this.failStreak = 0;
     this.lastError = '';
     this.sameError = 0;
+    this.deferred = new Map(); // connector tools not sent to the model until find_tools loads them
+    this.squeeze = 1; // shrinks the history budget after the model says the request was too big
   }
 
   browser() {
@@ -197,15 +213,26 @@ class Agent {
     this.emit('plan', { steps: this.plan.map((s) => ({ ...s })) });
   }
 
-  render(mode) {
-    // Trim old tool output when the conversation outgrows the context budget (keep newest, keep first user turn).
-    const budget = Math.round(this.settings.contextChars * this.effort.context);
+  /**
+   * The history as chat messages, fitted to `limit` characters: old tool output is trimmed first, then
+   * old messages are shortened, and when even that is too long the oldest steps are dropped (the first
+   * request always stays). One huge tool result can take at most 40% of the room.
+   */
+  render(mode, limit) {
+    const budget = Math.min(Math.round(this.settings.contextChars * this.effort.context), limit || Infinity);
+    const cap = Math.max(800, Math.floor(budget * 0.4));
     let used = 0;
-    const items = this.history.map((h) => ({ ...h }));
+    let items = this.history.map((h) => ({ ...h, content: h.content && h.content.length > cap ? truncate(h.content, cap, false) : h.content }));
+    let cut = 0; // items before this index (except the first) are dropped
     for (let i = items.length - 1; i >= 0; i--) {
-      used += (items[i].content || '').length + 40;
+      used += (items[i].content || '').length + JSON.stringify((items[i].call && items[i].call.args) || '').length + 40;
       if (used > budget && items[i].role === 'tool' && i > 0) items[i].content = '[older tool output trimmed to save context]';
-      else if (used > budget * 1.6 && i > 0 && items[i].role !== 'user') items[i].content = truncate(items[i].content, 200, false);
+      else if (used > budget && i > 0 && items[i].role !== 'user') items[i].content = truncate(items[i].content, 200, false);
+      if (used > budget * 1.5 && i > 0 && !cut) cut = i + 1;
+    }
+    if (cut > 1) {
+      while (cut < items.length && items[cut].role === 'tool') cut++; // never keep a tool result without its call
+      items = [items[0], { role: 'user', content: `[${cut - 1} earlier steps were dropped to fit the model's memory. Check the workspace files for what was done.]` }, ...items.slice(cut)];
     }
     const out = [];
     for (const h of items) {
@@ -333,14 +360,62 @@ class Agent {
     this.toolByName.remember = tool;
   }
 
-  /** Adds the tools of every enabled connector (Blender, Figma...) for this request. */
-  async addConnectorTools() {
+  /**
+   * Adds the tools of every enabled connector (Blender, Figma...) for this request. A local model has a
+   * small context and some apps bring hundreds of tools, so only the ones that fit are sent: those that
+   * match the request best. The rest wait behind find_tools, the way Claude defers tools.
+   */
+  async addConnectorTools(userText = '') {
     if (!(this.settings.connectors || []).some((c) => c.enabled !== false)) return;
-    const extra = await this.connectors.toolsFor(this.settings, (t) => this.notice(t, 'warn'));
+    const extra = (await this.connectors.toolsFor(this.settings, (t) => this.notice(t, 'warn'))).filter((t) => !this.toolByName[t.name]);
+    if (!extra.length) return;
+    this.window = await contextTokens(this.settings);
+    let room = Math.round(this.window * CHARS_PER_TOKEN * 0.15);
+    const total = extra.reduce((n, t) => n + toolChars(t), 0);
+    const picked = total <= room ? extra : rankTools(extra, userText).filter((t) => {
+      if (!matchScore(t, userText)) return false;
+      room -= toolChars(t);
+      return room >= 0;
+    });
     for (const t of extra) {
-      if (this.toolByName[t.name]) continue;
-      this.tools.push(t);
       this.toolByName[t.name] = t;
+      if (picked.includes(t)) this.tools.push(t); else this.deferred.set(t.name, t);
+    }
+    if (this.deferred.size) this.addFindTools();
+  }
+
+  /** find_tools: searches the connector tools that were left out and loads the best matches. */
+  addFindTools() {
+    if (this.toolByName.find_tools) return;
+    const apps = [...new Set([...this.deferred.values()].map((t) => t.connector))].join(', ');
+    const tool = {
+      name: 'find_tools',
+      icon: 'magnifying-glass',
+      description: `Load more tools from the connected apps (${apps}). Only some of their tools are loaded now. Describe what you need, like "generate a 3D model" or "create a Linear issue"; the matching tools are loaded for your next turn.`,
+      parameters: { type: 'object', properties: { query: { type: 'string', description: 'what the tool should do, or the app name' } }, required: ['query'] },
+      label: (a) => `Looking for tools: ${a.query}`,
+      run: async (a) => {
+        const found = rankTools([...this.deferred.values()], a.query).filter((t) => matchScore(t, a.query)).slice(0, 5);
+        if (!found.length) return `No tools matched "${a.query}". Apps with more tools: ${apps}. Try other words.`;
+        for (const t of found) this.activate(t);
+        return `Loaded ${found.length} tools you can call now:\n${found.map((t) => `- ${t.name}: ${t.description.slice(0, 160)}`).join('\n')}`;
+      },
+    };
+    this.tools.push(tool);
+    this.toolByName.find_tools = tool;
+  }
+
+  /** Sends a deferred connector tool to the model from now on, dropping the oldest loaded ones if they no longer fit. */
+  activate(t) {
+    if (!this.deferred.delete(t.name)) return;
+    this.tools.push(t);
+    this.loaded = [...(this.loaded || []), t];
+    let over = this.tools.filter((x) => x.connector).reduce((n, x) => n + toolChars(x), 0) - Math.round((this.window || 16384) * CHARS_PER_TOKEN * 0.2);
+    while (over > 0 && this.loaded.length > 5) {
+      const old = this.loaded.shift();
+      this.tools = this.tools.filter((x) => x !== old);
+      this.deferred.set(old.name, old);
+      over -= toolChars(old);
     }
   }
 
@@ -368,11 +443,22 @@ class Agent {
     const names = this.tools.map((t) => t.name);
     let files = '';
     try { files = truncate(listDir(this.workspace, '.', 3), 1500); } catch { /* workspace not readable */ }
-    const messages = [{ role: 'system', content: systemPrompt({ plan: this.plan, mode, tools: this.tools, effort: this.effort, files, apps: this.appNames(), brief: this.brief && this.brief.text, skills: this.skills, memory: this.settings.memory }) }, ...this.render(mode)];
+    const system = systemPrompt({ plan: this.plan, mode, tools: this.tools, effort: this.effort, files, apps: this.appNames(), brief: this.brief && this.brief.text, skills: this.skills, memory: this.settings.memory });
+    // What is left of the model's context for the conversation, after the instructions, the tools and room for the reply.
+    this.window = await contextTokens(this.settings);
+    const fixed = system.length + (mode === 'native' ? this.tools.reduce((n, t) => n + toolChars(t), 0) : 0);
+    const room = Math.max(3000, Math.round(((this.window - 2500) * CHARS_PER_TOKEN - fixed) * this.squeeze));
+    const messages = [{ role: 'system', content: system }, ...this.render(mode, room)];
     let r;
     try {
       r = await this.callModel(messages, mode === 'native' ? this.tools : null);
     } catch (e) {
+      if (e.contextOverflow) {
+        if (this.squeeze < 0.2) throw new Error(`The model's context (${await contextTokens(this.settings)} tokens) is too small for this task, even after trimming. Use a model with a bigger context, or turn off connectors you are not using.`);
+        this.squeeze *= 0.5;
+        this.notice('The conversation was too long for the model, so Freehand trimmed older steps and tried again.', 'warn');
+        return this.decide();
+      }
       if (e.toolsUnsupported) {
         this.nativeBroken.add(e.providerId || this.settings.active);
         this.notice(`${e.providerId || this.settings.active} does not support native tool calling; switching to JSON tool mode.`);
@@ -382,6 +468,7 @@ class Agent {
     }
     const content = stripThinking(r.content);
     const call = r.toolCalls.find((c) => this.toolByName[c.name]) || null;
+    if (call && this.deferred.has(call.name)) this.activate(this.deferred.get(call.name));
     if (r.toolCalls.length && !call) return { retry: `Unknown tool "${r.toolCalls[0].name}". Available tools: ${names.join(', ')}.` };
     if (call) {
       if (call.parseError) return { retry: 'Your tool call arguments were not valid JSON. Call the tool again with valid JSON arguments.' };
@@ -426,7 +513,7 @@ class Agent {
     this.history.push({ role: 'user', content: userText, ...(turn === undefined ? {} : { turn }) });
     this.emit('status', { status: 'running' });
     try {
-      await this.addConnectorTools();
+      await this.addConnectorTools(userText);
       this.addSkills(userText);
       this.addMemoryTool();
       this.brief = await this.designGame(userText);

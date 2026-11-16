@@ -357,3 +357,77 @@ test('file_edit copes with escaped line breaks and different indentation from sm
   assert.throws(() => locateEdit(t, 'nope', ''), /not found/);
   assert.throws(() => locateEdit('a;a;', 'a;', 'b'), /matches 2 times/);
 });
+
+/** A connector manager stand-in whose apps bring hundreds of tools, like Higgsfield does. */
+function bigConnectors(ran) {
+  const mk = (app, name, description) => ({
+    name: `${app.toLowerCase()}__${name}`, connector: app, icon: 'plug', description: `[${app}] ${description}`,
+    parameters: { type: 'object', properties: { prompt: { type: 'string', description: 'x'.repeat(300) } } },
+    label: () => name, approval: null, run: async (a) => { ran.push(name); return 'ok'; },
+  });
+  const tools = [];
+  for (let i = 0; i < 200; i++) tools.push(mk('Higgsfield', `studio_tool_${i}`, `Studio feature number ${i} for ads and influencers`));
+  tools.push(mk('Higgsfield', 'generate_3d', 'Generate a 3D model from a text prompt'));
+  for (let i = 0; i < 40; i++) tools.push(mk('Linear', `admin_${i}`, `Workspace admin task ${i}`));
+  tools.push(mk('Linear', 'save_issue', 'Create or update an issue in Linear'));
+  return { toolsFor: async () => tools };
+}
+
+test('context: only connector tools that fit are sent, and find_tools loads more', async () => {
+  const ws = fs.mkdtempSync(path.join(home, 'ws-'));
+  const ran = [];
+  const sizes = [];
+  const prov = await mockProvider((body, i) => {
+    sizes.push(JSON.stringify(body).length);
+    if (i === 0) return { message: text(JSON.stringify({ title: 'Model', steps: ['Make it'] })) };
+    const names = (body.tools || []).map((t) => t.function.name);
+    if (i === 1) {
+      assert.ok(names.includes('higgsfield__generate_3d'), names.join());
+      assert.ok(names.includes('find_tools'));
+      assert.ok(!names.includes('linear__save_issue'));
+      return { message: toolCall('find_tools', { query: 'create a Linear issue' }) };
+    }
+    if (i === 2) { assert.ok(names.includes('linear__save_issue'), names.join()); return { message: toolCall('linear__save_issue', { prompt: 'x' }) }; }
+    return { message: toolCall('finish', { message: 'Done.' }) };
+  });
+  const s = defaultSettings();
+  s.active = 'custom'; s.providers.custom.baseUrl = prov.url; s.providers.custom.model = 'mock'; s.providers.custom.toolMode = 'native';
+  s.providers.custom.contextTokens = 16384;
+  s.connectors = [{ id: 'h', name: 'Higgsfield', enabled: true }];
+  try {
+    const agent = new Agent({ settings: s, workspace: ws, signal: new AbortController().signal, history: [], connectors: bigConnectors(ran),
+      emit: () => {}, ask: async () => '', approve: async () => true });
+    const r = await agent.run('generate a 3d model of a crate');
+    assert.equal(r.status, 'done');
+    assert.deepEqual(ran, ['save_issue']);
+    assert.ok(Math.max(...sizes) < 16384 * 3, `largest request ${Math.max(...sizes)} chars`);
+  } finally { prov.close(); }
+});
+
+test('context: a long history is fitted to the model, and a too-big request is trimmed and retried', async () => {
+  const ws = fs.mkdtempSync(path.join(home, 'ws-'));
+  const sizes = [];
+  let overflowed = false;
+  const prov = await mockProvider((body, i) => {
+    sizes.push(JSON.stringify(body.messages).length);
+    if (i === 0) return { message: text(JSON.stringify({ title: 'More', steps: ['Answer'] })) };
+    if (!overflowed) { overflowed = true; return { status: 400, error: 'request (110965 tokens) exceeds the available context size (16384 tokens), try increasing it' }; }
+    return { message: toolCall('finish', { message: 'Done.' }) };
+  });
+  const s = defaultSettings();
+  s.active = 'custom'; s.providers.custom.baseUrl = prov.url; s.providers.custom.model = 'mock'; s.providers.custom.toolMode = 'native';
+  s.providers.custom.contextTokens = 16384;
+  const history = [{ role: 'user', content: 'first request' }];
+  for (let i = 0; i < 60; i++) {
+    history.push({ role: 'assistant', content: '', call: { id: `c${i}`, name: 'web_fetch', args: { url: `https://e.com/${i}` } } });
+    history.push({ role: 'tool', id: `c${i}`, name: 'web_fetch', content: 'page text '.repeat(3000) });
+  }
+  try {
+    const agent = new Agent({ settings: s, workspace: ws, signal: new AbortController().signal, history, connectors: { toolsFor: async () => [] },
+      emit: () => {}, ask: async () => '', approve: async () => true });
+    const r = await agent.run('one more thing');
+    assert.equal(r.status, 'done');
+    assert.ok(overflowed);
+    assert.ok(Math.max(...sizes.slice(1)) < 16384 * 3, `largest history ${Math.max(...sizes)} chars`);
+  } finally { prov.close(); }
+});

@@ -10,7 +10,34 @@ class ProviderError extends Error {
     this.retryable = !!opts.retryable;
     this.toolsUnsupported = !!opts.toolsUnsupported;
     this.retryAfterMs = opts.retryAfterMs || 0;
+    this.contextOverflow = !!opts.contextOverflow;
   }
+}
+
+// How many tokens each provider's model can take, learned from the server or from its errors.
+const windows = new Map();
+const windowKey = (settings, providerId) => `${providerId}|${(settings.providers[providerId] || {}).model}`;
+
+/**
+ * The model's context size in tokens. Ollama runs models with a fixed num_ctx (freehand-v2: 16384),
+ * so ask it; hosted models are assumed to take 128k unless the provider sets contextTokens.
+ */
+async function contextTokens(settings, providerId = settings.active) {
+  const p = settings.providers[providerId] || {};
+  if (Number(p.contextTokens) > 0) return Number(p.contextTokens);
+  const key = windowKey(settings, providerId);
+  if (windows.has(key)) return windows.get(key);
+  let n = 128000;
+  if (providerId === 'ollama' || /:11434\b/.test(p.baseUrl || '')) {
+    n = 4096; // Ollama's default when the model sets no num_ctx
+    try {
+      const res = await fetch(joinUrl(String(p.baseUrl).replace(/\/v1\/?$/, ''), 'api/show'), { method: 'POST', body: JSON.stringify({ model: p.model }), signal: AbortSignal.timeout(5000) });
+      const m = /num_ctx\s+(\d+)/.exec((await res.json()).parameters || '');
+      if (m) n = Number(m[1]);
+    } catch { /* keep the default */ }
+  }
+  windows.set(key, n);
+  return n;
 }
 
 function sleep(ms, signal) {
@@ -111,11 +138,14 @@ async function chatOnce({ settings, providerId, messages, tools, signal }) {
     const text = (await res.text().catch(() => '')).slice(0, 600);
     const ra = Number(res.headers.get('retry-after'));
     const retryable = [408, 425, 429, 500, 502, 503, 504].includes(res.status);
-    const toolsUnsupported = [400, 404, 422].includes(res.status) && /tool|function/i.test(text);
+    const contextOverflow = [400, 413, 422].includes(res.status) && /exceeds? (the )?(available )?context|context (length|size|window)|too many tokens|maximum context/i.test(text);
+    const toolsUnsupported = !contextOverflow && [400, 404, 422].includes(res.status) && /tool|function/i.test(text);
+    const told = /context size \((\d+) tokens\)/i.exec(text);
+    if (told) windows.set(windowKey(settings, providerId), Number(told[1]));
     let msg = `${providerId} returned HTTP ${res.status}`;
     try { const j = JSON.parse(text); msg += `: ${(j.error && (j.error.message || j.error)) || j.message || text}`; } catch { if (text) msg += `: ${text}`; }
     if (res.status === 401 || res.status === 403) msg += ' (check your API key)';
-    throw new ProviderError(msg, res.status, { retryable, toolsUnsupported, retryAfterMs: Number.isFinite(ra) ? ra * 1000 : 0 });
+    throw new ProviderError(msg, res.status, { retryable, toolsUnsupported, contextOverflow, retryAfterMs: Number.isFinite(ra) ? ra * 1000 : 0 });
   }
 
   let data;
@@ -183,7 +213,7 @@ async function chat({ settings, messages, tools, signal, providerOrder, onNotice
       return { ...r, providerId };
     } catch (e) {
       if (signal && signal.aborted) throw e;
-      if (e.toolsUnsupported) { e.providerId = providerId; throw e; }
+      if (e.toolsUnsupported || e.contextOverflow) { e.providerId = providerId; throw e; }
       lastErr = e;
       if (i < order.length - 1 && onNotice) onNotice(`${providerId} failed (${e.message.slice(0, 140)}). Switching to ${order[i + 1]}.`);
     }
@@ -207,4 +237,4 @@ async function listModels(settings, providerId) {
   return [...new Set(ids)].sort();
 }
 
-module.exports = { chat, chatOnce, listModels, ProviderError };
+module.exports = { chat, chatOnce, listModels, contextTokens, ProviderError };
